@@ -1,6 +1,6 @@
 # Vercel Opportunity Finder
 
-一个本地网页小工具，用来发现和分析 `*.vercel.app` 子域名里的需求机会。
+一个网页小工具，用来发现和分析 `*.vercel.app` 子域名里的需求机会。支持本地运行，也支持使用 GitHub Pages 托管前端、Cloudflare Worker 托管 API。
 
 ## 适合什么场景
 
@@ -24,6 +24,7 @@
 
 - React + Vite
 - Express 本地 API 代理
+- Cloudflare Worker 线上 API
 - Cheerio 解析页面元信息
 - Common Crawl Index API
 - URLScan Search API
@@ -46,6 +47,70 @@ API 默认运行在：
 
 ```bash
 http://127.0.0.1:4174/
+```
+
+## GitHub Pages + Cloudflare Worker 部署
+
+推荐线上部署拆成两部分：
+
+- GitHub Pages：托管 `dist/` 静态前端。
+- Cloudflare Worker：提供 `/api/health`、`/api/discover/commoncrawl`、`/api/discover/urlscan`、`/api/analyze`。
+
+### 1. 部署 Worker API
+
+先登录 Cloudflare：
+
+```bash
+npx wrangler login
+```
+
+本地调试 Worker：
+
+```bash
+npm run worker:dev
+```
+
+部署 Worker：
+
+```bash
+npm run worker:deploy
+```
+
+部署完成后记录 Worker 地址，例如：
+
+```bash
+https://vercel-opportunity-finder-api.<your-subdomain>.workers.dev
+```
+
+### 2. 配置 GitHub Pages
+
+在 GitHub 仓库里进入：
+
+```text
+Settings -> Pages -> Build and deployment -> Source -> GitHub Actions
+```
+
+然后在仓库 Secrets 中添加：
+
+```text
+VITE_API_BASE_URL=https://vercel-opportunity-finder-api.<your-subdomain>.workers.dev
+```
+
+推送到 `main` 后，`.github/workflows/pages.yml` 会自动执行：
+
+```bash
+npm ci
+npm run build:pages
+```
+
+构建时前端会把 API 请求指向 `VITE_API_BASE_URL`。如果没有配置该变量，前端会继续请求同源 `/api/*`，适合本地 Express 开发。
+
+Workflow 会自动把 Vite `base` 设置成 `/<repo>/`，适配 GitHub Pages 项目站路径。
+
+### 3. 本地模拟 Pages 构建
+
+```bash
+VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:8788 npm run build:pages
 ```
 
 ## 常用流程
