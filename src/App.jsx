@@ -67,6 +67,19 @@ function normalizeManualUrls(value) {
     .filter(Boolean);
 }
 
+function pickRandomItems(items, count, excludedHosts = new Set()) {
+  const preferred = items.filter((item) => !excludedHosts.has(hostFromUrl(item.url)));
+  const pool = preferred.length >= count ? preferred : items;
+  const shuffled = [...pool];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+  }
+
+  return shuffled.slice(0, count);
+}
+
 function readWatchlist() {
   if (typeof window === "undefined") return {};
 
@@ -235,6 +248,7 @@ export default function App() {
     urlscan: true
   });
   const [manualUrls, setManualUrls] = useState(DEFAULT_MANUAL);
+  const [candidatePool, setCandidatePool] = useState([]);
   const [rows, setRows] = useState([]);
   const [selectedHost, setSelectedHost] = useState("");
   const [query, setQuery] = useState("");
@@ -334,25 +348,56 @@ export default function App() {
     }));
   }
 
+  async function analyzeBatch(candidates, { excludedHosts = new Set(), reason = "random" } = {}) {
+    const analyzeLimit = Math.min(candidates.length, 30);
+    const targets = pickRandomItems(candidates, analyzeLimit, excludedHosts);
+    const modeLabel = reason === "reshuffle" ? "换一批" : "随机抽样";
+
+    setRows([]);
+    setSelectedHost("");
+    setStatus(`候选池 ${candidates.length} 个，${modeLabel}分析 ${targets.length} 个...`);
+
+    const analyzed = await analyzeUrls({
+      urls: targets,
+      limit: analyzeLimit,
+      source: "Discovery"
+    });
+
+    const sorted = analyzed.items.sort((a, b) => b.score - a.score);
+    setRows(sorted);
+    setSelectedHost(sorted[0]?.host || "");
+    setStatus(`完成：候选池 ${candidates.length} 个，已${modeLabel}分析 ${sorted.length} 个，按机会分排序。`);
+  }
+
   async function runDiscovery() {
     setLoading(true);
     setError("");
+    setCandidatePool([]);
     setRows([]);
     setSelectedHost("");
 
     try {
       const discovered = [];
+      const sourceErrors = [];
 
       if (selectedSources.commoncrawl) {
         setStatus("Common Crawl：拉取 vercel.app 候选域名...");
-        const payload = await discoverCommonCrawl({ suffix, limit });
-        discovered.push(...payload.items);
+        try {
+          const payload = await discoverCommonCrawl({ suffix, limit });
+          discovered.push(...payload.items);
+        } catch (err) {
+          sourceErrors.push(`Common Crawl：${err.message || "拉取失败"}`);
+        }
       }
 
       if (selectedSources.urlscan) {
         setStatus("URLScan：检索近期扫描记录...");
-        const payload = await discoverUrlscan({ suffix, limit: Math.min(limit, 100) });
-        discovered.push(...payload.items);
+        try {
+          const payload = await discoverUrlscan({ suffix, limit: Math.min(limit, 100) });
+          discovered.push(...payload.items);
+        } catch (err) {
+          sourceErrors.push(`URLScan：${err.message || "检索失败"}`);
+        }
       }
 
       const manual = normalizeManualUrls(manualUrls).map((url) => ({
@@ -374,23 +419,35 @@ export default function App() {
         return;
       }
 
-      const analyzeLimit = Math.min(unique.length, 30);
-      const targets = unique.slice(0, analyzeLimit);
+      if (sourceErrors.length) {
+        setError(sourceErrors.join("；"));
+      }
 
-      setStatus(`发现 ${unique.length} 个候选，正在深度分析前 ${analyzeLimit} 个...`);
-      const analyzed = await analyzeUrls({
-        urls: targets,
-        limit: analyzeLimit,
-        source: "Discovery"
-      });
-
-      const sorted = analyzed.items.sort((a, b) => b.score - a.score);
-      setRows(sorted);
-      setSelectedHost(sorted[0]?.host || "");
-      setStatus(`完成：发现 ${unique.length} 个候选，已分析 ${sorted.length} 个，按机会分排序。`);
+      setCandidatePool(unique);
+      await analyzeBatch(unique);
     } catch (err) {
       setError(err.message || "扫描失败");
       setStatus("扫描中断：请看错误信息。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function reshuffleBatch() {
+    if (!candidatePool.length) return;
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const currentHosts = new Set(rows.map((row) => row.host));
+      await analyzeBatch(candidatePool, {
+        excludedHosts: currentHosts,
+        reason: "reshuffle"
+      });
+    } catch (err) {
+      setError(err.message || "换一批失败");
+      setStatus("换一批中断：请看错误信息。");
     } finally {
       setLoading(false);
     }
@@ -477,6 +534,14 @@ export default function App() {
             <button className="primary-btn" onClick={runDiscovery} disabled={loading}>
               {loading ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               开始发现
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={reshuffleBatch}
+              disabled={loading || !candidatePool.length}
+            >
+              {loading ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              换一批
             </button>
             <button
               className="ghost-btn"
