@@ -21,12 +21,78 @@ import {
   Terminal,
   Zap
 } from "lucide-react";
-import { analyzeUrls, discoverCommonCrawl, discoverUrlscan } from "./api";
+import {
+  analyzeUrls,
+  discoverCertificates,
+  discoverCommonCrawl,
+  discoverGithubIssues,
+  discoverGithubRepos,
+  discoverGitlab,
+  discoverHackerNews,
+  discoverInternetArchive,
+  discoverNpm,
+  discoverUrlscan
+} from "./api";
 
 const SOURCES = [
   { key: "commoncrawl", label: "Common Crawl", hint: "公开网页索引" },
-  { key: "urlscan", label: "URLScan", hint: "近期扫描记录" }
+  { key: "urlscan", label: "URLScan", hint: "近期扫描记录" },
+  { key: "githubRepos", label: "GitHub Repos", hint: "仓库描述/主页" },
+  { key: "githubIssues", label: "GitHub Issues", hint: "Issue 讨论" },
+  { key: "hackernews", label: "Hacker News", hint: "HN 提交" },
+  { key: "npm", label: "npm", hint: "包描述/主页" },
+  { key: "gitlab", label: "GitLab", hint: "公开项目" },
+  { key: "internetArchive", label: "Internet Archive", hint: "历史网页快照" },
+  { key: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧" }
 ];
+
+const DISCOVERY_RUNNERS = {
+  commoncrawl: {
+    status: "Common Crawl：拉取候选域名...",
+    limit: (value) => value,
+    discover: discoverCommonCrawl
+  },
+  urlscan: {
+    status: "URLScan：检索近期扫描记录...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverUrlscan
+  },
+  githubRepos: {
+    status: "GitHub Repos：搜索仓库描述和主页...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverGithubRepos
+  },
+  githubIssues: {
+    status: "GitHub Issues：搜索公开讨论...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverGithubIssues
+  },
+  hackernews: {
+    status: "Hacker News：搜索提交记录...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverHackerNews
+  },
+  npm: {
+    status: "npm：搜索包描述和主页...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverNpm
+  },
+  gitlab: {
+    status: "GitLab：搜索公开项目...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverGitlab
+  },
+  internetArchive: {
+    status: "Internet Archive：检索历史快照...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverInternetArchive
+  },
+  certificates: {
+    status: "crt.sh：检索证书透明日志...",
+    limit: (value) => Math.min(value, 100),
+    discover: discoverCertificates
+  }
+};
 
 const DEFAULT_MANUAL = [
   "rule34dle.vercel.app",
@@ -245,7 +311,14 @@ export default function App() {
   const [limit, setLimit] = useState(40);
   const [selectedSources, setSelectedSources] = useState({
     commoncrawl: true,
-    urlscan: true
+    urlscan: true,
+    githubRepos: true,
+    githubIssues: true,
+    hackernews: true,
+    npm: true,
+    gitlab: true,
+    internetArchive: false,
+    certificates: false
   });
   const [manualUrls, setManualUrls] = useState(DEFAULT_MANUAL);
   const [candidatePool, setCandidatePool] = useState([]);
@@ -380,23 +453,19 @@ export default function App() {
       const discovered = [];
       const sourceErrors = [];
 
-      if (selectedSources.commoncrawl) {
-        setStatus("Common Crawl：拉取 vercel.app 候选域名...");
-        try {
-          const payload = await discoverCommonCrawl({ suffix, limit });
-          discovered.push(...payload.items);
-        } catch (err) {
-          sourceErrors.push(`Common Crawl：${err.message || "拉取失败"}`);
-        }
-      }
+      for (const source of SOURCES) {
+        const runner = DISCOVERY_RUNNERS[source.key];
+        if (!selectedSources[source.key] || !runner) continue;
 
-      if (selectedSources.urlscan) {
-        setStatus("URLScan：检索近期扫描记录...");
+        setStatus(runner.status);
         try {
-          const payload = await discoverUrlscan({ suffix, limit: Math.min(limit, 100) });
-          discovered.push(...payload.items);
+          const payload = await runner.discover({
+            suffix,
+            limit: runner.limit(limit)
+          });
+          discovered.push(...(payload.items || []));
         } catch (err) {
-          sourceErrors.push(`URLScan：${err.message || "检索失败"}`);
+          sourceErrors.push(`${source.label}：${err.message || "检索失败"}`);
         }
       }
 

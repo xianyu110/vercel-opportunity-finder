@@ -32,6 +32,62 @@ function normalizeUrl(value) {
   return `https://${raw}`;
 }
 
+function normalizeSuffix(value) {
+  const suffix = String(value || "vercel.app")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^\*\./, "")
+    .replace(/\/.*$/, "")
+    .replace(/^\.+|\.+$/g, "");
+
+  return suffix || "vercel.app";
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rootUrlFromHost(value) {
+  try {
+    const parsed = new URL(normalizeUrl(value));
+    return `https://${parsed.hostname.toLowerCase()}/`;
+  } catch {
+    return "";
+  }
+}
+
+function extractHostedUrls(values, suffix) {
+  const normalizedSuffix = normalizeSuffix(suffix);
+  const escapedSuffix = escapeRegExp(normalizedSuffix);
+  const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+  const pattern = new RegExp(
+    `(?:https?:\\/\\/)?(?:\\*\\.)?${label}(?:\\.${label})*\\.${escapedSuffix}`,
+    "gi"
+  );
+  const urls = [];
+
+  for (const value of values.flat()) {
+    const text = String(value || "");
+    for (const match of text.matchAll(pattern)) {
+      const raw = match[0]
+        .replace(/[.,;:!?)}\]]+$/g, "")
+        .replace(/^(https?:\/\/)\*\./i, "$1")
+        .replace(/^\*\./, "");
+      const url = rootUrlFromHost(raw);
+      const host = safeHost(url);
+
+      if (!host || host === normalizedSuffix || !host.endsWith(`.${normalizedSuffix}`)) {
+        continue;
+      }
+
+      urls.push(url);
+    }
+  }
+
+  return [...new Set(urls)];
+}
+
 function uniqueByHost(items) {
   const seen = new Set();
   const deduped = [];
@@ -95,20 +151,29 @@ function validatePublicHttpUrl(value) {
 }
 
 async function fetchJson(url, init = {}) {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      "user-agent": USER_AGENT,
-      accept: "application/json",
-      ...(init.headers || {})
+  const { timeoutMs = 15000, ...fetchInit } = init;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...fetchInit,
+      signal: fetchInit.signal || controller.signal,
+      headers: {
+        "user-agent": USER_AGENT,
+        accept: "application/json",
+        ...(fetchInit.headers || {})
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from ${url}`);
     }
-  });
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${url}`);
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return response.json();
 }
 
 async function fetchText(url, init = {}) {
@@ -266,7 +331,7 @@ async function analyzeOne(input, source = "Manual") {
 
 async function discoverCommonCrawl(requestUrl) {
   const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 500);
-  const suffix = String(requestUrl.searchParams.get("suffix") || "vercel.app").replace(/^\*\./, "");
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
   const collections = await fetchJson(COMMON_CRAWL_COLLECTIONS);
   const latest = collections?.[0]?.id;
 
@@ -323,7 +388,7 @@ async function discoverCommonCrawl(requestUrl) {
 
 async function discoverUrlscan(requestUrl) {
   const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
-  const suffix = String(requestUrl.searchParams.get("suffix") || "vercel.app").replace(/^\*\./, "");
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
   const query = `page.domain:${suffix} AND page.status:200`;
   const params = new URLSearchParams({
     q: query,
@@ -341,6 +406,228 @@ async function discoverUrlscan(requestUrl) {
   return {
     ok: true,
     source: "URLScan",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverGithubRepos(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    q: suffix,
+    per_page: String(limit)
+  });
+  const json = await fetchJson(`https://api.github.com/search/repositories?${params}`, {
+    headers: {
+      accept: "application/vnd.github+json"
+    }
+  });
+  const items = (json.items || []).flatMap((repo) =>
+    extractHostedUrls(
+      [
+        repo.homepage,
+        repo.description,
+        repo.name,
+        repo.full_name,
+        repo.html_url
+      ],
+      suffix
+    ).map((url) => ({
+      url,
+      source: "GitHub Repos",
+      title: repo.full_name || repo.name || "",
+      lastSeen: repo.pushed_at || repo.updated_at || "",
+      stars: repo.stargazers_count || 0
+    }))
+  );
+
+  return {
+    ok: true,
+    source: "GitHub Repos",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverGithubIssues(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    q: `${suffix} in:title,body`,
+    per_page: String(limit)
+  });
+  const json = await fetchJson(`https://api.github.com/search/issues?${params}`, {
+    headers: {
+      accept: "application/vnd.github+json"
+    }
+  });
+  const items = (json.items || []).flatMap((issue) =>
+    extractHostedUrls([issue.title, issue.body, issue.html_url], suffix).map((url) => ({
+      url,
+      source: "GitHub Issues",
+      title: issue.title || "",
+      lastSeen: issue.updated_at || issue.created_at || ""
+    }))
+  );
+
+  return {
+    ok: true,
+    source: "GitHub Issues",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverHackerNews(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    query: suffix,
+    tags: "story",
+    hitsPerPage: String(limit)
+  });
+  const json = await fetchJson(`https://hn.algolia.com/api/v1/search?${params}`);
+  const items = (json.hits || []).flatMap((hit) =>
+    extractHostedUrls([hit.url, hit.title, hit.story_text], suffix).map((url) => ({
+      url,
+      source: "Hacker News",
+      title: hit.title || "",
+      lastSeen: hit.created_at || hit.updated_at || "",
+      points: hit.points || 0
+    }))
+  );
+
+  return {
+    ok: true,
+    source: "Hacker News",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverNpm(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    text: suffix,
+    size: String(limit)
+  });
+  const json = await fetchJson(`https://registry.npmjs.org/-/v1/search?${params}`);
+  const items = (json.objects || []).flatMap((entry) => {
+    const pkg = entry.package || {};
+    const links = pkg.links || {};
+
+    return extractHostedUrls(
+      [
+        pkg.name,
+        pkg.description,
+        pkg.keywords?.join(" "),
+        links.homepage,
+        links.repository,
+        links.bugs,
+        links.npm
+      ],
+      suffix
+    ).map((url) => ({
+      url,
+      source: "npm",
+      title: pkg.name || "",
+      lastSeen: pkg.date || entry.updated || ""
+    }));
+  });
+
+  return {
+    ok: true,
+    source: "npm",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverGitlab(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    search: suffix,
+    per_page: String(limit),
+    order_by: "last_activity_at",
+    sort: "desc"
+  });
+  const json = await fetchJson(`https://gitlab.com/api/v4/projects?${params}`);
+  const items = (json || []).flatMap((project) =>
+    extractHostedUrls(
+      [
+        project.description,
+        project.name,
+        project.name_with_namespace,
+        project.web_url,
+        project.readme_url,
+        project.topics?.join(" ")
+      ],
+      suffix
+    ).map((url) => ({
+      url,
+      source: "GitLab",
+      title: project.name_with_namespace || project.name || "",
+      lastSeen: project.last_activity_at || project.created_at || "",
+      stars: project.star_count || 0
+    }))
+  );
+
+  return {
+    ok: true,
+    source: "GitLab",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverInternetArchive(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    url: `*.${suffix}/*`,
+    output: "json",
+    fl: "original,timestamp,statuscode,mimetype",
+    limit: String(Math.max(limit * 4, 100)),
+    collapse: "urlkey"
+  });
+  params.append("filter", "statuscode:200");
+  params.append("filter", "mimetype:text/html");
+
+  const json = await fetchJson(`https://web.archive.org/cdx?${params}`, { timeoutMs: 20000 });
+  const rows = Array.isArray(json) ? json.slice(1) : [];
+  const items = rows.map((row) => ({
+    url: normalizeUrl(row?.[0] || ""),
+    source: "Internet Archive",
+    lastSeen: row?.[1] || "",
+    mime: row?.[3] || "",
+    httpStatus: Number(row?.[2] || 0)
+  }));
+
+  return {
+    ok: true,
+    source: "Internet Archive",
+    items: uniqueByHost(items).slice(0, limit)
+  };
+}
+
+async function discoverCertificates(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    q: `%.${suffix}`,
+    output: "json",
+    deduplicate: "Y"
+  });
+  const json = await fetchJson(`https://crt.sh/?${params}`, { timeoutMs: 20000 });
+  const items = (json || []).flatMap((cert) =>
+    extractHostedUrls([cert.name_value, cert.common_name], suffix).map((url) => ({
+      url,
+      source: "crt.sh",
+      title: cert.common_name || "",
+      lastSeen: cert.entry_timestamp || cert.not_before || ""
+    }))
+  );
+
+  return {
+    ok: true,
+    source: "crt.sh",
     items: uniqueByHost(items).slice(0, limit)
   };
 }
@@ -385,6 +672,34 @@ async function route(request) {
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/urlscan") {
       return jsonResponse(await discoverUrlscan(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/github-repos") {
+      return jsonResponse(await discoverGithubRepos(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/github-issues") {
+      return jsonResponse(await discoverGithubIssues(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/hackernews") {
+      return jsonResponse(await discoverHackerNews(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/npm") {
+      return jsonResponse(await discoverNpm(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/gitlab") {
+      return jsonResponse(await discoverGitlab(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/internet-archive") {
+      return jsonResponse(await discoverInternetArchive(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/certificates") {
+      return jsonResponse(await discoverCertificates(requestUrl));
     }
 
     if (request.method === "POST" && requestUrl.pathname === "/api/analyze") {

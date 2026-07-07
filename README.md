@@ -8,8 +8,8 @@
 
 ## 能做什么
 
-- 从 Common Crawl 拉取被公开索引过的 `vercel.app` 候选站。
-- 从 URLScan 拉取近期公开扫描过的站。
+- 从 Common Crawl、URLScan、GitHub、Hacker News、npm、GitLab 等公开数据源拉取 `vercel.app` 候选站。
+- 可选启用 Internet Archive 和 crt.sh，补充历史快照与证书透明日志里的候选域名。
 - 支持手动粘贴一批 URL。
 - 自动抓取首页 title、description、H1、canonical、robots。
 - 根据需求词、收录信号、SEO 缺口、是否仍使用 `vercel.app` 做机会评分。
@@ -28,6 +28,10 @@
 - Cheerio 解析页面元信息
 - Common Crawl Index API
 - URLScan Search API
+- GitHub Search API
+- Hacker News Algolia API
+- npm Registry Search API
+- GitLab Projects API
 - 本地 `localStorage` 保存收藏、阶段和备注
 
 ## 本地运行
@@ -54,7 +58,7 @@ http://127.0.0.1:4174/
 推荐线上部署拆成两部分：
 
 - GitHub Pages：托管 `dist/` 静态前端。
-- Cloudflare Worker：提供 `/api/health`、`/api/discover/commoncrawl`、`/api/discover/urlscan`、`/api/analyze`。
+- Cloudflare Worker：提供 `/api/health`、`/api/discover/*`、`/api/analyze`。
 
 ### 1. 部署 Worker API
 
@@ -127,6 +131,13 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 
 - Common Crawl：公开网页索引，适合批量发现已经被抓取的项目。
 - URLScan：公开扫描记录，适合发现最近被提交或扫描过的项目。
+- GitHub Repos：公开仓库描述、homepage 和仓库元信息里的站点。
+- GitHub Issues：公开 issue 标题和正文里提到的站点。
+- Hacker News：HN 提交记录里的站点。
+- npm：包描述、homepage 和 repository 字段里的站点。
+- GitLab：公开项目描述和项目元信息里的站点。
+- Internet Archive：历史网页快照，默认关闭，适合补充旧站点。
+- crt.sh：证书透明日志，默认关闭，量大但偏旧，公共服务也更容易超时。
 - Manual URLs：适合把 SEO 工具、社媒、GitHub 搜到的域名粘进来统一分析。
 
 ## 评分说明
