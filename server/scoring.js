@@ -116,6 +116,24 @@ function scoreLabel(score) {
   return "weak";
 }
 
+function metricValue(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function engagementScore({ stars, forks, openIssues, points, comments, downloadsWeekly }) {
+  return Math.round(
+    clamp(
+      Math.min(24, Math.log10(metricValue(stars) + 1) * 12) +
+        Math.min(10, Math.log10(metricValue(forks) + 1) * 8) +
+        Math.min(8, Math.log10(metricValue(openIssues) + 1) * 5) +
+        Math.min(24, Math.log10(metricValue(points) + 1) * 12) +
+        Math.min(10, Math.log10(metricValue(comments) + 1) * 7) +
+        Math.min(28, Math.log10(metricValue(downloadsWeekly) + 1) * 9)
+    )
+  );
+}
+
 export function inferKeyword({ url, title, description, h1 }) {
   const host = safeHost(url);
   const slug = host.replace(/\.vercel\.app$/, "").replace(/[-_]+/g, " ");
@@ -151,6 +169,7 @@ export function scoreOpportunity(site) {
   const hasOwnDomain = !host.endsWith(".vercel.app");
   const isReachable = site.httpStatus >= 200 && site.httpStatus < 300;
   const hasSeoBasics = hasText(site.title) && hasText(site.description) && hasText(site.h1);
+  const externalSignalScore = engagementScore(site);
 
   const demandScore = clamp(
     24 +
@@ -158,7 +177,8 @@ export function scoreOpportunity(site) {
       (commercialMatches.length ? 18 : 0) +
       (hasText(site.description) ? 8 : 0) +
       (site.wordCount > 800 ? 8 : 0) +
-      (includesAny(text, GAME_WORDS) ? 6 : 0)
+      (includesAny(text, GAME_WORDS) ? 6 : 0) +
+      Math.round(externalSignalScore * 0.35)
   );
 
   const seoWeaknessScore = clamp(
@@ -184,7 +204,8 @@ export function scoreOpportunity(site) {
       commercialMatches.length * 14 +
       (toolMatches.length ? 16 : 0) +
       (includesAny(text, ["free", "online", "template", "generator"]) ? 12 : 0) -
-      (adultMatches.length ? 20 : 0)
+      (adultMatches.length ? 20 : 0) +
+      Math.round(externalSignalScore * 0.18)
   );
 
   const riskScore = clamp(
@@ -200,6 +221,7 @@ export function scoreOpportunity(site) {
       seoWeaknessScore * 0.2 +
       replicabilityScore * 0.25 +
       commercialScore * 0.15 +
+      externalSignalScore * 0.1 +
       (100 - riskScore) * 0.1
   );
 
@@ -217,6 +239,31 @@ export function scoreOpportunity(site) {
     score += 2;
     signals.push("手动导入");
   }
+
+  if (site.source === "GitHub Repos") {
+    signals.push("GitHub 仓库提及");
+  }
+
+  if (site.source === "GitHub Issues") {
+    signals.push("GitHub 讨论提及");
+  }
+
+  if (site.source === "Hacker News") {
+    signals.push("Hacker News 提及");
+  }
+
+  if (site.source === "npm") {
+    signals.push("npm 包生态提及");
+  }
+
+  if (site.source === "GitLab") {
+    signals.push("GitLab 项目提及");
+  }
+
+  if (site.stars > 0) signals.push(`stars ${site.stars}`);
+  if (site.points > 0) signals.push(`HN points ${site.points}`);
+  if (site.downloadsWeekly > 0) signals.push(`npm weekly downloads ${site.downloadsWeekly}`);
+  if (site.comments > 0) signals.push(`讨论评论 ${site.comments}`);
 
   if (isReachable) {
     score += 4;
@@ -310,6 +357,7 @@ export function scoreOpportunity(site) {
       seoGap: { score: seoWeaknessScore, label: scoreLabel(seoWeaknessScore) },
       replicability: { score: replicabilityScore, label: scoreLabel(replicabilityScore) },
       commercial: { score: commercialScore, label: scoreLabel(commercialScore) },
+      external: { score: externalSignalScore, label: scoreLabel(externalSignalScore) },
       risk: { score: riskScore, label: riskScore >= 60 ? "high" : riskScore >= 30 ? "medium" : "low" }
     }
   };

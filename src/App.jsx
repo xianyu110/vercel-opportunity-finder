@@ -217,6 +217,20 @@ function buildResearchLinks(site) {
   ];
 }
 
+function buildExternalSignals(site) {
+  const signals = [];
+  if (site?.stars > 0) signals.push(`stars ${site.stars}`);
+  if (site?.forks > 0) signals.push(`forks ${site.forks}`);
+  if (site?.openIssues > 0) signals.push(`issues ${site.openIssues}`);
+  if (site?.points > 0) signals.push(`HN points ${site.points}`);
+  if (site?.comments > 0) signals.push(`comments ${site.comments}`);
+  if (site?.downloadsWeekly > 0) signals.push(`weekly downloads ${site.downloadsWeekly}`);
+  if (site?.downloadsMonthly > 0) signals.push(`monthly downloads ${site.downloadsMonthly}`);
+  if (site?.repoName) signals.push(site.repoName);
+  if (site?.packageName) signals.push(site.packageName);
+  return signals;
+}
+
 function downloadTextFile({ content, filename, type = "text/markdown;charset=utf-8" }) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -238,20 +252,22 @@ function exportCsv(rows) {
     "description",
     "weaknesses",
     "signals",
+    "externalSignals",
     "riskFlags",
     "categoryTags",
     "lastSeen"
   ];
   const escapeCell = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const csvCellValue = (row, key) => {
+    if (key === "externalSignals") return buildExternalSignals(row).join("; ");
+    if (Array.isArray(row[key])) return row[key].join("; ");
+    return row[key];
+  };
   const csv = [
     headers.join(","),
     ...rows.map((row) =>
       headers
-        .map((key) =>
-          escapeCell(
-            Array.isArray(row[key]) ? row[key].join("; ") : row[key]
-          )
-        )
+        .map((key) => escapeCell(csvCellValue(row, key)))
         .join(",")
     )
   ].join("\n");
@@ -287,6 +303,7 @@ function buildMarkdownReport(rows) {
     lines.push(`- 风险：${(row.riskFlags || []).join(" / ") || "未发现高风险信号"}`);
     lines.push(`- SEO 缺口：${(row.weaknesses || []).join(" / ") || "-"}`);
     lines.push(`- 信号：${(row.signals || []).join(" / ") || "-"}`);
+    lines.push(`- 外部热度：${buildExternalSignals(row).join(" / ") || "-"}`);
     lines.push(`- 备注：${watch.note || "-"}`);
     lines.push("");
     lines.push("验证入口：");
@@ -845,6 +862,8 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
     );
   }
 
+  const externalSignals = buildExternalSignals(site);
+
   return (
     <aside className="inspector">
       <div className="inspector-head">
@@ -927,7 +946,17 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
           <MetricBar label="SEO 缺口" metric={site.scoreBreakdown?.seoGap} />
           <MetricBar label="可复制性" metric={site.scoreBreakdown?.replicability} />
           <MetricBar label="商业化" metric={site.scoreBreakdown?.commercial} />
+          <MetricBar label="外部热度" metric={site.scoreBreakdown?.external} />
           <MetricBar label="风险" metric={site.scoreBreakdown?.risk} invert />
+        </div>
+      </section>
+
+      <section>
+        <h3>外部热度</h3>
+        <div className="tag-list">
+          {externalSignals.length
+            ? externalSignals.map((item) => <span key={item}>{item}</span>)
+            : <span>暂无外部热度信号</span>}
         </div>
       </section>
 

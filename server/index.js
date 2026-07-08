@@ -179,13 +179,31 @@ function extractMeta(html) {
   };
 }
 
+function metadataFromInput(input) {
+  const item = typeof input === "object" && input ? input : {};
+
+  return {
+    stars: Number(item.stars || 0),
+    forks: Number(item.forks || 0),
+    openIssues: Number(item.openIssues || 0),
+    points: Number(item.points || 0),
+    comments: Number(item.comments || 0),
+    downloadsWeekly: Number(item.downloadsWeekly || 0),
+    downloadsMonthly: Number(item.downloadsMonthly || 0),
+    packageName: item.packageName || "",
+    repoName: item.repoName || "",
+    externalUrl: item.externalUrl || ""
+  };
+}
+
 async function analyzeOne(input, source = "Manual") {
   const url = normalizeUrl(input.url || input);
   const base = {
     url,
     source: input.source || source,
     discoveredAt: input.discoveredAt || new Date().toISOString(),
-    lastSeen: input.lastSeen || input.timestamp || ""
+    lastSeen: input.lastSeen || input.timestamp || "",
+    ...metadataFromInput(input)
   };
 
   try {
@@ -346,7 +364,11 @@ app.get("/api/discover/github-repos", async (req, res) => {
         source: "GitHub Repos",
         title: repo.full_name || repo.name || "",
         lastSeen: repo.pushed_at || repo.updated_at || "",
-        stars: repo.stargazers_count || 0
+        stars: repo.stargazers_count || 0,
+        forks: repo.forks_count || 0,
+        openIssues: repo.open_issues_count || 0,
+        repoName: repo.full_name || repo.name || "",
+        externalUrl: repo.html_url || ""
       }))
     );
 
@@ -378,7 +400,9 @@ app.get("/api/discover/github-issues", async (req, res) => {
         url,
         source: "GitHub Issues",
         title: issue.title || "",
-        lastSeen: issue.updated_at || issue.created_at || ""
+        lastSeen: issue.updated_at || issue.created_at || "",
+        comments: issue.comments || 0,
+        externalUrl: issue.html_url || ""
       }))
     );
 
@@ -408,7 +432,9 @@ app.get("/api/discover/hackernews", async (req, res) => {
         source: "Hacker News",
         title: hit.title || "",
         lastSeen: hit.created_at || hit.updated_at || "",
-        points: hit.points || 0
+        points: hit.points || 0,
+        comments: hit.num_comments || 0,
+        externalUrl: `https://news.ycombinator.com/item?id=${hit.objectID}`
       }))
     );
 
@@ -450,7 +476,11 @@ app.get("/api/discover/npm", async (req, res) => {
         url,
         source: "npm",
         title: pkg.name || "",
-        lastSeen: pkg.date || entry.updated || ""
+        lastSeen: pkg.date || entry.updated || "",
+        downloadsWeekly: entry.downloads?.weekly || 0,
+        downloadsMonthly: entry.downloads?.monthly || 0,
+        packageName: pkg.name || "",
+        externalUrl: links.npm || ""
       }));
     });
 
@@ -491,7 +521,10 @@ app.get("/api/discover/gitlab", async (req, res) => {
         source: "GitLab",
         title: project.name_with_namespace || project.name || "",
         lastSeen: project.last_activity_at || project.created_at || "",
-        stars: project.star_count || 0
+        stars: project.star_count || 0,
+        forks: project.forks_count || 0,
+        repoName: project.path_with_namespace || project.name_with_namespace || project.name || "",
+        externalUrl: project.web_url || ""
       }))
     );
 

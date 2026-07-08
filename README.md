@@ -13,7 +13,8 @@
 - 支持手动粘贴一批 URL。
 - 自动抓取首页 title、description、H1、canonical、robots。
 - 根据需求词、收录信号、SEO 缺口、是否仍使用 `vercel.app` 做机会评分。
-- 输出五维判断：需求信号、SEO 缺口、可复制性、商业化潜力、合规/仿站风险。
+- 结合 GitHub stars/forks/issues、HN points/comments、npm downloads 等外部热度信号辅助判断。
+- 输出多维判断：需求信号、SEO 缺口、可复制性、商业化潜力、外部热度、合规/仿站风险。
 - 自动给出 `值得 / 观察 / 放弃` 结论，并标记仿站、登录页、成人内容、作品集、工具站等类型。
 - 为每个关键词生成验证入口：Google、Google Trends、GitHub、Reddit、Product Hunt。
 - 支持收藏机会、填写阶段和备注，并保存到浏览器本地。
@@ -148,6 +149,7 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 - SEO 缺口：是否缺少 title、description、H1、canonical 等基础 SEO。
 - 可复制性：是否适合做一个更完整的自有域名版本。
 - 商业化潜力：是否包含模板、PDF、YouTube、AI、设计、视频等可变现关键词。
+- 外部热度：是否有 GitHub stars/forks/issues、HN points/comments、npm downloads 等公开热度。
 - 风险：是否疑似品牌仿站、登录/账号页、成人内容或其他不适合复刻的页面。
 
 ## 注意
