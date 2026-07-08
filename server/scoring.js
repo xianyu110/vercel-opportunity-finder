@@ -121,6 +121,27 @@ function metricValue(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function normalizedBrand(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function hostnameFromUrl(value) {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function domainBrand(hostname) {
+  const parts = String(hostname || "").replace(/^www\./, "").split(".").filter(Boolean);
+  if (!parts.length) return "";
+  if (hostname.endsWith(".vercel.app")) {
+    return normalizedBrand(parts.slice(0, -2).join(""));
+  }
+  return normalizedBrand(parts.length >= 2 ? parts[parts.length - 2] : parts[0]);
+}
+
 function engagementScore({ stars, forks, openIssues, points, comments, downloadsWeekly }) {
   return Math.round(
     clamp(
@@ -132,6 +153,20 @@ function engagementScore({ stars, forks, openIssues, points, comments, downloads
         Math.min(28, Math.log10(metricValue(downloadsWeekly) + 1) * 9)
     )
   );
+}
+
+function officialProductHost({ originalUrl, url, canonical, ogUrl }) {
+  const originalHost = hostnameFromUrl(originalUrl || url);
+  if (!originalHost.endsWith(".vercel.app")) return "";
+
+  const originalBrand = domainBrand(originalHost);
+  if (!originalBrand) return "";
+
+  const candidateHosts = [url, canonical, ogUrl]
+    .map((value) => hostnameFromUrl(value))
+    .filter((host) => host && !host.endsWith(".vercel.app"));
+
+  return candidateHosts.find((host) => domainBrand(host) === originalBrand) || "";
 }
 
 export function inferKeyword({ url, title, description, h1 }) {
@@ -170,6 +205,8 @@ export function scoreOpportunity(site) {
   const isReachable = site.httpStatus >= 200 && site.httpStatus < 300;
   const hasSeoBasics = hasText(site.title) && hasText(site.description) && hasText(site.h1);
   const externalSignalScore = engagementScore(site);
+  const officialHost = officialProductHost(site);
+  const hasOfficialProduct = Boolean(officialHost);
 
   const demandScore = clamp(
     24 +
@@ -212,6 +249,7 @@ export function scoreOpportunity(site) {
     brandMatches.length * 28 +
       adultMatches.length * 30 +
       loginMatches.length * 18 +
+      (hasOfficialProduct ? 45 : 0) +
       (includesAny(text, ["clone", "blocked"]) ? 18 : 0) +
       (site.robots?.toLowerCase().includes("noindex") ? 16 : 0)
   );
@@ -312,6 +350,13 @@ export function scoreOpportunity(site) {
     riskFlags.push("登录/账号页，需求不可直接复用");
   }
 
+  if (hasOfficialProduct) {
+    score -= 42;
+    riskFlags.push(`已有正式产品：${officialHost}`);
+    weaknesses.push("Vercel 子域疑似正式产品别名");
+    categoryTags.push("已有正式产品");
+  }
+
   if (!hasOwnDomain) {
     weaknesses.push("未绑定自有域名");
   } else {
@@ -326,7 +371,7 @@ export function scoreOpportunity(site) {
 
   const normalizedScore = clamp(score);
   const decision =
-    riskScore >= 45 || normalizedScore < 45
+    hasOfficialProduct || riskScore >= 45 || normalizedScore < 45
       ? "放弃"
       : normalizedScore >= 72 && riskScore < 35 && demandScore >= 55
         ? "值得"
@@ -337,7 +382,9 @@ export function scoreOpportunity(site) {
       ? "需求信号和 SEO 缺口同时存在，适合做更完整的自有域名版本。"
       : "需求信号和可复制性较强，适合继续验证搜索量和差异化空间。";
   const fitReason =
-    decision === "值得"
+    hasOfficialProduct
+      ? "该 Vercel 子域已指向同品牌正式产品或自有域名，不适合作为复刻机会。"
+      : decision === "值得"
       ? worthReason
       : decision === "观察"
         ? "存在可验证线索，但需要先确认搜索量、合规风险或页面质量。"

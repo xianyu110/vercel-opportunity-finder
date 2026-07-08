@@ -166,6 +166,7 @@ function extractMeta(html) {
   const canonical = $('link[rel="canonical"]').attr("href") || "";
   const robots = $('meta[name="robots"]').attr("content") || "";
   const ogTitle = $('meta[property="og:title"]').attr("content") || "";
+  const ogUrl = $('meta[property="og:url"]').attr("content") || "";
   const bodyText = $("body").text().replace(/\s+/g, " ").trim();
 
   return {
@@ -175,6 +176,7 @@ function extractMeta(html) {
     canonical,
     robots,
     ogTitle: String(ogTitle).replace(/\s+/g, " ").trim(),
+    ogUrl,
     wordCount: bodyText ? bodyText.split(/\s+/).length : 0
   };
 }
@@ -200,6 +202,7 @@ async function analyzeOne(input, source = "Manual") {
   const url = normalizeUrl(input.url || input);
   const base = {
     url,
+    originalUrl: normalizeUrl(input.originalUrl || input.url || input),
     source: input.source || source,
     discoveredAt: input.discoveredAt || new Date().toISOString(),
     lastSeen: input.lastSeen || input.timestamp || "",
@@ -213,6 +216,7 @@ async function analyzeOne(input, source = "Manual") {
       ...base,
       ...meta,
       httpStatus: response.status,
+      originalUrl: base.originalUrl,
       url: response.finalUrl || url
     });
 
@@ -221,6 +225,7 @@ async function analyzeOne(input, source = "Manual") {
       ...meta,
       ...scored,
       url: response.finalUrl || url,
+      originalUrl: base.originalUrl,
       host: safeHost(response.finalUrl || url),
       httpStatus: response.status,
       contentType: response.contentType,

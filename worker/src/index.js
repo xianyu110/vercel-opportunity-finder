@@ -245,6 +245,7 @@ function extractMeta(html) {
   const canonical = getAttr(source.match(/<link[^>]+rel=["']canonical["'][^>]*>/i)?.[0] || "", "href");
   const robots = getAttr(source.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] || "", "content");
   const ogTitle = getAttr(source.match(/<meta[^>]+property=["']og:title["'][^>]*>/i)?.[0] || "", "content");
+  const ogUrl = getAttr(source.match(/<meta[^>]+property=["']og:url["'][^>]*>/i)?.[0] || "", "content");
   const bodyText = stripTags(source.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] || source);
 
   return {
@@ -254,6 +255,7 @@ function extractMeta(html) {
     canonical,
     robots,
     ogTitle: String(ogTitle).replace(/\s+/g, " ").trim(),
+    ogUrl,
     wordCount: bodyText ? bodyText.split(/\s+/).length : 0
   };
 }
@@ -285,6 +287,7 @@ async function analyzeOne(input, source = "Manual") {
     const fallbackUrl = normalizeUrl(rawUrl);
     const base = {
       url: fallbackUrl,
+      originalUrl: fallbackUrl,
       source: input.source || source,
       discoveredAt: input.discoveredAt || new Date().toISOString(),
       lastSeen: input.lastSeen || input.timestamp || "",
@@ -307,6 +310,7 @@ async function analyzeOne(input, source = "Manual") {
 
   const base = {
     url,
+    originalUrl: normalizeUrl(input.originalUrl || rawUrl),
     source: input.source || source,
     discoveredAt: input.discoveredAt || new Date().toISOString(),
     lastSeen: input.lastSeen || input.timestamp || "",
@@ -320,6 +324,7 @@ async function analyzeOne(input, source = "Manual") {
       ...base,
       ...meta,
       httpStatus: response.status,
+      originalUrl: base.originalUrl,
       url: response.finalUrl || url
     });
 
@@ -328,6 +333,7 @@ async function analyzeOne(input, source = "Manual") {
       ...meta,
       ...scored,
       url: response.finalUrl || url,
+      originalUrl: base.originalUrl,
       host: safeHost(response.finalUrl || url),
       httpStatus: response.status,
       contentType: response.contentType,

@@ -151,6 +151,7 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 - 商业化潜力：是否包含模板、PDF、YouTube、AI、设计、视频等可变现关键词。
 - 外部热度：是否有 GitHub stars/forks/issues、HN points/comments、npm downloads 等公开热度。
 - 风险：是否疑似品牌仿站、登录/账号页、成人内容或其他不适合复刻的页面。
+- 已有正式产品：如果 `*.vercel.app` 子域已跳转到同品牌自有域名，或页面 `canonical` / `og:url` 指向同品牌正式站，会标记为已有正式产品并降权。
 
 ## 注意
 
