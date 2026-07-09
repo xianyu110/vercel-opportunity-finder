@@ -3,13 +3,18 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import * as cheerio from "cheerio";
 import { scoreOpportunity, safeHost } from "./scoring.js";
+import {
+  mergeCandidatesByHost,
+  selectAnalysisBatch
+} from "./candidates.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 4174);
 const COMMON_CRAWL_COLLECTIONS = "https://index.commoncrawl.org/collinfo.json";
 const USER_AGENT =
-  "VercelOpportunityFinder/0.1 (+local research tool; contact: local)";
+  "VercelOpportunityFinder/0.2 (+local research tool; contact: local)";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -84,17 +89,62 @@ function extractHostedUrls(values, suffix) {
 }
 
 function uniqueByHost(items) {
-  const seen = new Set();
-  const deduped = [];
+  return mergeCandidatesByHost(items);
+}
 
-  for (const item of items) {
-    const host = safeHost(item.url);
-    if (!host || seen.has(host)) continue;
-    seen.add(host);
-    deduped.push(item);
+function isPrivateIPv4(hostname) {
+  const parts = hostname.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return false;
+  const [first, second] = parts;
+
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    first === 0
+  );
+}
+
+function isBlockedHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "metadata.google.internal" ||
+    host === "169.254.169.254" ||
+    host === "[::1]" ||
+    isPrivateIPv4(host)
+  );
+}
+
+function validatePublicHttpUrl(value) {
+  const normalized = normalizeUrl(value);
+  let parsed;
+
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("Invalid URL");
   }
 
-  return deduped;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http and https URLs are supported");
+  }
+
+  if (isBlockedHost(parsed.hostname)) {
+    throw new Error("Private and localhost URLs are not allowed");
+  }
+
+  return parsed.toString();
+}
+
+function githubHeaders() {
+  return {
+    accept: "application/vnd.github+json",
+    ...(GITHUB_TOKEN ? { authorization: `Bearer ${GITHUB_TOKEN}` } : {})
+  };
 }
 
 async function fetchJson(url, init = {}) {
@@ -125,31 +175,43 @@ async function fetchJson(url, init = {}) {
 
 async function fetchText(url, init = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  let currentUrl = validatePublicHttpUrl(url);
 
   try {
-    const response = await fetch(url, {
-      ...init,
-      signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "user-agent": USER_AGENT,
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        ...(init.headers || {})
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+      const response = await fetch(currentUrl, {
+        ...init,
+        signal: controller.signal,
+        redirect: "manual",
+        headers: {
+          "user-agent": USER_AGENT,
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          ...(init.headers || {})
+        }
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) break;
+        currentUrl = validatePublicHttpUrl(new URL(location, currentUrl).toString());
+        continue;
       }
-    });
 
-    const contentType = response.headers.get("content-type") || "";
-    const text = contentType.includes("text") || contentType.includes("html")
-      ? await response.text()
-      : "";
+      const contentType = response.headers.get("content-type") || "";
+      const text = contentType.includes("text") || contentType.includes("html")
+        ? await response.text()
+        : "";
 
-    return {
-      status: response.status,
-      finalUrl: response.url,
-      contentType,
-      text: text.slice(0, 350000)
-    };
+      return {
+        status: response.status,
+        finalUrl: response.url || currentUrl,
+        contentType,
+        text: text.slice(0, 350000)
+      };
+    }
+
+    throw new Error("Too many redirects");
   } finally {
     clearTimeout(timeout);
   }
@@ -199,13 +261,42 @@ function metadataFromInput(input) {
 }
 
 async function analyzeOne(input, source = "Manual") {
-  const url = normalizeUrl(input.url || input);
+  const rawUrl = input.url || input;
+  let url;
+
+  try {
+    url = validatePublicHttpUrl(rawUrl);
+  } catch (error) {
+    const fallbackUrl = normalizeUrl(rawUrl);
+    const base = {
+      url: fallbackUrl,
+      originalUrl: fallbackUrl,
+      source: input.source || source,
+      sources: input.sources || (input.source ? [input.source] : [source]),
+      discoveredAt: input.discoveredAt || new Date().toISOString(),
+      lastSeen: input.lastSeen || input.timestamp || "",
+      priorityScore: input.priorityScore || 0,
+      ...metadataFromInput(input)
+    };
+    const scored = scoreOpportunity({ ...base, httpStatus: 0 });
+    return {
+      ...base,
+      ...scored,
+      host: safeHost(fallbackUrl),
+      httpStatus: 0,
+      ok: false,
+      error: error.message || "Invalid URL"
+    };
+  }
+
   const base = {
     url,
-    originalUrl: normalizeUrl(input.originalUrl || input.url || input),
+    originalUrl: normalizeUrl(input.originalUrl || rawUrl),
     source: input.source || source,
+    sources: input.sources || (input.source ? [input.source] : [source]),
     discoveredAt: input.discoveredAt || new Date().toISOString(),
     lastSeen: input.lastSeen || input.timestamp || "",
+    priorityScore: input.priorityScore || 0,
     ...metadataFromInput(input)
   };
 
@@ -252,16 +343,11 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "vercel-opportunity-finder" });
 });
 
-app.get("/api/discover/commoncrawl", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 500);
-    const suffix = normalizeSuffix(req.query.suffix);
+const DISCOVER_HANDLERS = {
+  commoncrawl: async ({ suffix, limit }) => {
     const collections = await fetchJson(COMMON_CRAWL_COLLECTIONS);
     const latest = collections?.[0]?.id;
-
-    if (!latest) {
-      throw new Error("No Common Crawl collection found");
-    }
+    if (!latest) throw new Error("No Common Crawl collection found");
 
     const params = new URLSearchParams({
       url: `*.${suffix}/*`,
@@ -279,10 +365,7 @@ app.get("/api/discover/commoncrawl", async (req, res) => {
         accept: "application/json"
       }
     });
-
-    if (!response.ok) {
-      throw new Error(`Common Crawl returned HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Common Crawl returned HTTP ${response.status}`);
 
     const lines = (await response.text()).split("\n").filter(Boolean);
     const items = lines
@@ -302,25 +385,17 @@ app.get("/api/discover/commoncrawl", async (req, res) => {
       })
       .filter(Boolean);
 
-    res.json({
+    return {
       ok: true,
       source: "Common Crawl",
       collection: latest,
       items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/urlscan", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
-    const query = `page.domain:${suffix} AND page.status:200`;
+    };
+  },
+  urlscan: async ({ suffix, limit }) => {
     const params = new URLSearchParams({
-      q: query,
-      size: String(limit)
+      q: `page.domain:${suffix} AND page.status:200`,
+      size: String(Math.min(limit, 100))
     });
     const json = await fetchJson(`https://urlscan.io/api/v1/search/?${params}`);
     const items = (json.results || []).map((result) => ({
@@ -330,39 +405,19 @@ app.get("/api/discover/urlscan", async (req, res) => {
       lastSeen: result.task?.time || result.indexedAt || "",
       httpStatus: result.page?.status || 0
     }));
-
-    res.json({
-      ok: true,
-      source: "URLScan",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/github-repos", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "URLScan", items: uniqueByHost(items).slice(0, limit) };
+  },
+  "github-repos": async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       q: suffix,
-      per_page: String(limit)
+      per_page: String(Math.min(limit, 100))
     });
     const json = await fetchJson(`https://api.github.com/search/repositories?${params}`, {
-      headers: {
-        accept: "application/vnd.github+json"
-      }
+      headers: githubHeaders()
     });
     const items = (json.items || []).flatMap((repo) =>
       extractHostedUrls(
-        [
-          repo.homepage,
-          repo.description,
-          repo.name,
-          repo.full_name,
-          repo.html_url
-        ],
+        [repo.homepage, repo.description, repo.name, repo.full_name, repo.html_url],
         suffix
       ).map((url) => ({
         url,
@@ -376,29 +431,15 @@ app.get("/api/discover/github-repos", async (req, res) => {
         externalUrl: repo.html_url || ""
       }))
     );
-
-    res.json({
-      ok: true,
-      source: "GitHub Repos",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/github-issues", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "GitHub Repos", items: uniqueByHost(items).slice(0, limit) };
+  },
+  "github-issues": async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       q: `${suffix} in:title,body`,
-      per_page: String(limit)
+      per_page: String(Math.min(limit, 100))
     });
     const json = await fetchJson(`https://api.github.com/search/issues?${params}`, {
-      headers: {
-        accept: "application/vnd.github+json"
-      }
+      headers: githubHeaders()
     });
     const items = (json.items || []).flatMap((issue) =>
       extractHostedUrls([issue.title, issue.body, issue.html_url], suffix).map((url) => ({
@@ -410,25 +451,13 @@ app.get("/api/discover/github-issues", async (req, res) => {
         externalUrl: issue.html_url || ""
       }))
     );
-
-    res.json({
-      ok: true,
-      source: "GitHub Issues",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/hackernews", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "GitHub Issues", items: uniqueByHost(items).slice(0, limit) };
+  },
+  hackernews: async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       query: suffix,
       tags: "story",
-      hitsPerPage: String(limit)
+      hitsPerPage: String(Math.min(limit, 100))
     });
     const json = await fetchJson(`https://hn.algolia.com/api/v1/search?${params}`);
     const items = (json.hits || []).flatMap((hit) =>
@@ -442,30 +471,17 @@ app.get("/api/discover/hackernews", async (req, res) => {
         externalUrl: `https://news.ycombinator.com/item?id=${hit.objectID}`
       }))
     );
-
-    res.json({
-      ok: true,
-      source: "Hacker News",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/npm", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "Hacker News", items: uniqueByHost(items).slice(0, limit) };
+  },
+  npm: async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       text: suffix,
-      size: String(limit)
+      size: String(Math.min(limit, 100))
     });
     const json = await fetchJson(`https://registry.npmjs.org/-/v1/search?${params}`);
     const items = (json.objects || []).flatMap((entry) => {
       const pkg = entry.package || {};
       const links = pkg.links || {};
-
       return extractHostedUrls(
         [
           pkg.name,
@@ -488,24 +504,12 @@ app.get("/api/discover/npm", async (req, res) => {
         externalUrl: links.npm || ""
       }));
     });
-
-    res.json({
-      ok: true,
-      source: "npm",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/gitlab", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "npm", items: uniqueByHost(items).slice(0, limit) };
+  },
+  gitlab: async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       search: suffix,
-      per_page: String(limit),
+      per_page: String(Math.min(limit, 100)),
       order_by: "last_activity_at",
       sort: "desc"
     });
@@ -532,21 +536,9 @@ app.get("/api/discover/gitlab", async (req, res) => {
         externalUrl: project.web_url || ""
       }))
     );
-
-    res.json({
-      ok: true,
-      source: "GitLab",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/internet-archive", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "GitLab", items: uniqueByHost(items).slice(0, limit) };
+  },
+  "internet-archive": async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       url: `*.${suffix}/*`,
       output: "json",
@@ -556,7 +548,6 @@ app.get("/api/discover/internet-archive", async (req, res) => {
     });
     params.append("filter", "statuscode:200");
     params.append("filter", "mimetype:text/html");
-
     const json = await fetchJson(`https://web.archive.org/cdx?${params}`, { timeoutMs: 20000 });
     const rows = Array.isArray(json) ? json.slice(1) : [];
     const items = rows.map((row) => ({
@@ -566,21 +557,9 @@ app.get("/api/discover/internet-archive", async (req, res) => {
       mime: row?.[3] || "",
       httpStatus: Number(row?.[2] || 0)
     }));
-
-    res.json({
-      ok: true,
-      source: "Internet Archive",
-      items: uniqueByHost(items).slice(0, limit)
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
-  }
-});
-
-app.get("/api/discover/certificates", async (req, res) => {
-  try {
-    const limit = normalizeLimit(req.query.limit, 80, 100);
-    const suffix = normalizeSuffix(req.query.suffix);
+    return { ok: true, source: "Internet Archive", items: uniqueByHost(items).slice(0, limit) };
+  },
+  certificates: async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       q: `%.${suffix}`,
       output: "json",
@@ -595,37 +574,132 @@ app.get("/api/discover/certificates", async (req, res) => {
         lastSeen: cert.entry_timestamp || cert.not_before || ""
       }))
     );
+    return { ok: true, source: "crt.sh", items: uniqueByHost(items).slice(0, limit) };
+  }
+};
+
+
+function mountDiscoverGet(pathKey, handlerKey) {
+  app.get(`/api/discover/${pathKey}`, async (req, res) => {
+    try {
+      const limit = normalizeLimit(req.query.limit, 80, handlerKey === "commoncrawl" ? 500 : 100);
+      const suffix = normalizeSuffix(req.query.suffix);
+      const payload = await DISCOVER_HANDLERS[handlerKey]({ suffix, limit });
+      res.json(payload);
+    } catch (error) {
+      res.status(502).json({ ok: false, error: error.message });
+    }
+  });
+}
+
+const DISCOVER_GET_ROUTES = [
+  ["commoncrawl", "commoncrawl"],
+  ["urlscan", "urlscan"],
+  ["github-repos", "github-repos"],
+  ["github-issues", "github-issues"],
+  ["hackernews", "hackernews"],
+  ["npm", "npm"],
+  ["gitlab", "gitlab"],
+  ["internet-archive", "internet-archive"],
+  ["certificates", "certificates"]
+];
+
+for (const [pathKey, handlerKey] of DISCOVER_GET_ROUTES) {
+  mountDiscoverGet(pathKey, handlerKey);
+}
+
+app.post("/api/discover", async (req, res) => {
+  try {
+    const suffix = normalizeSuffix(req.body?.suffix || "vercel.app");
+    const limit = normalizeLimit(req.body?.limit, 40, 150);
+    const sources = Array.isArray(req.body?.sources) ? req.body.sources : Object.keys(DISCOVER_HANDLERS);
+    const selected = sources
+      .map((key) => String(key || "").trim())
+      .filter((key) => DISCOVER_HANDLERS[key]);
+
+    if (!selected.length) {
+      return res.status(400).json({ ok: false, error: "No valid sources selected" });
+    }
+
+    const settled = await Promise.allSettled(
+      selected.map(async (key) => {
+        const result = await DISCOVER_HANDLERS[key]({ suffix, limit });
+        return { key, ...result };
+      })
+    );
+
+    const items = [];
+    const sourceResults = [];
+    const errors = [];
+
+    for (const entry of settled) {
+      if (entry.status === "fulfilled") {
+        const payload = entry.value;
+        items.push(...(payload.items || []));
+        sourceResults.push({
+          key: payload.key,
+          source: payload.source,
+          ok: true,
+          count: (payload.items || []).length
+        });
+      } else {
+        errors.push(entry.reason?.message || "Discovery failed");
+      }
+    }
+
+    const merged = uniqueByHost(items);
 
     res.json({
       ok: true,
-      source: "crt.sh",
-      items: uniqueByHost(items).slice(0, limit)
+      suffix,
+      items: merged,
+      total: merged.length,
+      sources: sourceResults,
+      errors
     });
   } catch (error) {
-    res.status(502).json({ ok: false, error: error.message });
+    res.status(500).json({ ok: false, error: error.message });
   }
 });
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const limit = normalizeLimit(req.body?.limit, 80, 150);
+    const limit = normalizeLimit(req.body?.limit, 30, 150);
     const urls = Array.isArray(req.body?.urls) ? req.body.urls : [];
     const source = req.body?.source || "Manual";
-    const normalized = urls
-      .map((item) => (typeof item === "string" ? { url: item } : item))
-      .filter((item) => item?.url)
-      .slice(0, limit);
+    const mode = req.body?.mode === "random" ? "random" : "smart";
+    const excludedHosts = new Set(
+      (Array.isArray(req.body?.excludedHosts) ? req.body.excludedHosts : []).map(String)
+    );
+
+    const normalized = mergeCandidatesByHost(
+      urls
+        .map((item) => (typeof item === "string" ? { url: item, source } : item))
+        .filter((item) => item?.url)
+    );
+
+    const targets = selectAnalysisBatch(normalized, {
+      count: limit,
+      excludedHosts,
+      mode
+    });
 
     const results = [];
-    const concurrency = 10;
+    const concurrency = 12;
 
-    for (let index = 0; index < normalized.length; index += concurrency) {
-      const batch = normalized.slice(index, index + concurrency);
+    for (let index = 0; index < targets.length; index += concurrency) {
+      const batch = targets.slice(index, index + concurrency);
       const analyzed = await Promise.all(batch.map((item) => analyzeOne(item, source)));
       results.push(...analyzed);
     }
 
-    res.json({ ok: true, items: results });
+    res.json({
+      ok: true,
+      mode,
+      selected: targets.length,
+      poolSize: normalized.length,
+      items: results
+    });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }

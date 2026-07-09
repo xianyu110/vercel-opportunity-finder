@@ -1,8 +1,12 @@
 import { scoreOpportunity, safeHost } from "../../server/scoring.js";
+import {
+  mergeCandidatesByHost,
+  selectAnalysisBatch
+} from "../../server/candidates.js";
 
 const COMMON_CRAWL_COLLECTIONS = "https://index.commoncrawl.org/collinfo.json";
 const USER_AGENT =
-  "VercelOpportunityFinder/0.1 (+cloudflare-worker; contact: local)";
+  "VercelOpportunityFinder/0.2 (+cloudflare-worker; contact: local)";
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
@@ -89,17 +93,15 @@ function extractHostedUrls(values, suffix) {
 }
 
 function uniqueByHost(items) {
-  const seen = new Set();
-  const deduped = [];
+  return mergeCandidatesByHost(items);
+}
 
-  for (const item of items) {
-    const host = safeHost(item.url);
-    if (!host || seen.has(host)) continue;
-    seen.add(host);
-    deduped.push(item);
-  }
-
-  return deduped;
+function githubHeaders(env = {}) {
+  const token = env.GITHUB_TOKEN || env.GH_TOKEN || "";
+  return {
+    accept: "application/vnd.github+json",
+    ...(token ? { authorization: `Bearer ${token}` } : {})
+  };
 }
 
 function isPrivateIPv4(hostname) {
@@ -289,8 +291,10 @@ async function analyzeOne(input, source = "Manual") {
       url: fallbackUrl,
       originalUrl: fallbackUrl,
       source: input.source || source,
+      sources: input.sources || (input.source ? [input.source] : [source]),
       discoveredAt: input.discoveredAt || new Date().toISOString(),
       lastSeen: input.lastSeen || input.timestamp || "",
+      priorityScore: input.priorityScore || 0,
       ...metadataFromInput(input)
     };
     const scored = scoreOpportunity({
@@ -312,8 +316,10 @@ async function analyzeOne(input, source = "Manual") {
     url,
     originalUrl: normalizeUrl(input.originalUrl || rawUrl),
     source: input.source || source,
+    sources: input.sources || (input.source ? [input.source] : [source]),
     discoveredAt: input.discoveredAt || new Date().toISOString(),
     lastSeen: input.lastSeen || input.timestamp || "",
+    priorityScore: input.priorityScore || 0,
     ...metadataFromInput(input)
   };
 
@@ -437,7 +443,7 @@ async function discoverUrlscan(requestUrl) {
   };
 }
 
-async function discoverGithubRepos(requestUrl) {
+async function discoverGithubRepos(requestUrl, env = {}) {
   const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
   const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
   const params = new URLSearchParams({
@@ -445,9 +451,7 @@ async function discoverGithubRepos(requestUrl) {
     per_page: String(limit)
   });
   const json = await fetchJson(`https://api.github.com/search/repositories?${params}`, {
-    headers: {
-      accept: "application/vnd.github+json"
-    }
+    headers: githubHeaders(env)
   });
   const items = (json.items || []).flatMap((repo) =>
     extractHostedUrls(
@@ -479,7 +483,7 @@ async function discoverGithubRepos(requestUrl) {
   };
 }
 
-async function discoverGithubIssues(requestUrl) {
+async function discoverGithubIssues(requestUrl, env = {}) {
   const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
   const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
   const params = new URLSearchParams({
@@ -487,9 +491,7 @@ async function discoverGithubIssues(requestUrl) {
     per_page: String(limit)
   });
   const json = await fetchJson(`https://api.github.com/search/issues?${params}`, {
-    headers: {
-      accept: "application/vnd.github+json"
-    }
+    headers: githubHeaders(env)
   });
   const items = (json.items || []).flatMap((issue) =>
     extractHostedUrls([issue.title, issue.body, issue.html_url], suffix).map((url) => ({
@@ -676,27 +678,114 @@ async function discoverCertificates(requestUrl) {
 
 async function analyzeUrls(request) {
   const body = await request.json().catch(() => ({}));
-  const limit = normalizeLimit(body?.limit, 80, 150);
+  const limit = normalizeLimit(body?.limit, 30, 150);
   const urls = Array.isArray(body?.urls) ? body.urls : [];
   const source = body?.source || "Manual";
-  const normalized = urls
-    .map((item) => (typeof item === "string" ? { url: item } : item))
-    .filter((item) => item?.url)
-    .slice(0, limit);
+  const mode = body?.mode === "random" ? "random" : "smart";
+  const excludedHosts = new Set(
+    (Array.isArray(body?.excludedHosts) ? body.excludedHosts : []).map(String)
+  );
+
+  const normalized = mergeCandidatesByHost(
+    urls
+      .map((item) => (typeof item === "string" ? { url: item, source } : item))
+      .filter((item) => item?.url)
+  );
+
+  const targets = selectAnalysisBatch(normalized, {
+    count: limit,
+    excludedHosts,
+    mode
+  });
 
   const results = [];
-  const concurrency = 6;
+  const concurrency = 8;
 
-  for (let index = 0; index < normalized.length; index += concurrency) {
-    const batch = normalized.slice(index, index + concurrency);
+  for (let index = 0; index < targets.length; index += concurrency) {
+    const batch = targets.slice(index, index + concurrency);
     const analyzed = await Promise.all(batch.map((item) => analyzeOne(item, source)));
     results.push(...analyzed);
   }
 
-  return { ok: true, items: results };
+  return {
+    ok: true,
+    mode,
+    selected: targets.length,
+    poolSize: normalized.length,
+    items: results
+  };
 }
 
-async function route(request) {
+async function discoverAll(request, env = {}) {
+  const body = await request.json().catch(() => ({}));
+  const suffix = normalizeSuffix(body?.suffix || "vercel.app");
+  const limit = normalizeLimit(body?.limit, 40, 150);
+  const sourceKeys = Array.isArray(body?.sources)
+    ? body.sources
+    : [
+        "commoncrawl",
+        "urlscan",
+        "github-repos",
+        "github-issues",
+        "hackernews",
+        "npm",
+        "gitlab"
+      ];
+
+  const runners = {
+    commoncrawl: () => discoverCommonCrawl(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    urlscan: () => discoverUrlscan(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    "github-repos": () =>
+      discoverGithubRepos(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`), env),
+    "github-issues": () =>
+      discoverGithubIssues(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`), env),
+    hackernews: () => discoverHackerNews(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    npm: () => discoverNpm(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    gitlab: () => discoverGitlab(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    "internet-archive": () =>
+      discoverInternetArchive(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    certificates: () =>
+      discoverCertificates(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`))
+  };
+
+  const selected = sourceKeys.map(String).filter((key) => runners[key]);
+  const settled = await Promise.allSettled(
+    selected.map(async (key) => {
+      const result = await runners[key]();
+      return { key, ...result };
+    })
+  );
+
+  const items = [];
+  const sources = [];
+  const errors = [];
+
+  for (const entry of settled) {
+    if (entry.status === "fulfilled") {
+      items.push(...(entry.value.items || []));
+      sources.push({
+        key: entry.value.key,
+        source: entry.value.source,
+        ok: true,
+        count: (entry.value.items || []).length
+      });
+    } else {
+      errors.push(entry.reason?.message || "Discovery failed");
+    }
+  }
+
+  const merged = uniqueByHost(items);
+  return {
+    ok: true,
+    suffix,
+    items: merged,
+    total: merged.length,
+    sources,
+    errors
+  };
+}
+
+async function route(request, env = {}) {
   const requestUrl = new URL(request.url);
 
   if (request.method === "OPTIONS") {
@@ -717,11 +806,11 @@ async function route(request) {
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/github-repos") {
-      return jsonResponse(await discoverGithubRepos(requestUrl));
+      return jsonResponse(await discoverGithubRepos(requestUrl, env));
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/github-issues") {
-      return jsonResponse(await discoverGithubIssues(requestUrl));
+      return jsonResponse(await discoverGithubIssues(requestUrl, env));
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/hackernews") {
@@ -744,6 +833,10 @@ async function route(request) {
       return jsonResponse(await discoverCertificates(requestUrl));
     }
 
+    if (request.method === "POST" && requestUrl.pathname === "/api/discover") {
+      return jsonResponse(await discoverAll(request, env));
+    }
+
     if (request.method === "POST" && requestUrl.pathname === "/api/analyze") {
       return jsonResponse(await analyzeUrls(request));
     }
@@ -755,5 +848,7 @@ async function route(request) {
 }
 
 export default {
-  fetch: route
+  fetch(request, env, ctx) {
+    return route(request, env);
+  }
 };

@@ -14,57 +14,78 @@ async function readJson(response) {
   return payload;
 }
 
+function withParams({ suffix, limit }) {
+  return new URLSearchParams({ suffix, limit: String(limit) });
+}
+
 export async function discoverCommonCrawl({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/commoncrawl?${params}`)));
 }
 
 export async function discoverUrlscan({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/urlscan?${params}`)));
 }
 
 export async function discoverGithubRepos({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/github-repos?${params}`)));
 }
 
 export async function discoverGithubIssues({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/github-issues?${params}`)));
 }
 
 export async function discoverHackerNews({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/hackernews?${params}`)));
 }
 
 export async function discoverNpm({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/npm?${params}`)));
 }
 
 export async function discoverGitlab({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/gitlab?${params}`)));
 }
 
 export async function discoverInternetArchive({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/internet-archive?${params}`)));
 }
 
 export async function discoverCertificates({ suffix, limit }) {
-  const params = new URLSearchParams({ suffix, limit: String(limit) });
+  const params = withParams({ suffix, limit });
   return readJson(await fetch(apiUrl(`/api/discover/certificates?${params}`)));
 }
 
-export async function analyzeUrls({ urls, limit, source }) {
+/** Parallel multi-source discovery (preferred). */
+export async function discoverAll({ suffix, limit, sources }) {
+  return readJson(
+    await fetch(apiUrl("/api/discover"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ suffix, limit, sources })
+    })
+  );
+}
+
+export async function analyzeUrls({
+  urls,
+  limit,
+  source,
+  mode = "smart",
+  excludedHosts = []
+}) {
   return readJson(
     await fetch(apiUrl("/api/analyze"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ urls, limit, source })
+      body: JSON.stringify({ urls, limit, source, mode, excludedHosts })
     })
   );
 }

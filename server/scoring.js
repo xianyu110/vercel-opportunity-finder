@@ -28,7 +28,19 @@ const DEMAND_WORDS = [
   "image",
   "resume",
   "invoice",
-  "template"
+  "template",
+  "color",
+  "quiz",
+  "game",
+  "guess",
+  "editor",
+  "compress",
+  "remove background",
+  "ocr",
+  "prompt",
+  "chat",
+  "translator",
+  "summarizer"
 ];
 
 const TOOL_WORDS = [
@@ -48,7 +60,18 @@ const TOOL_WORDS = [
   "length",
   "timer",
   "download",
-  "template"
+  "template",
+  "editor",
+  "compress",
+  "crop",
+  "remover",
+  "ocr",
+  "prompt",
+  "translator",
+  "summarizer",
+  "color",
+  "tone",
+  "matcher"
 ];
 
 const COMMERCIAL_WORDS = [
@@ -69,7 +92,12 @@ const COMMERCIAL_WORDS = [
   "design",
   "video",
   "chart",
-  "analytics"
+  "analytics",
+  "pricing",
+  "pro",
+  "premium",
+  "subscription",
+  "saas"
 ];
 
 const BRAND_RISK_WORDS = [
@@ -90,7 +118,20 @@ const BRAND_RISK_WORDS = [
 const ADULT_WORDS = ["rule34", "porn", "xxx", "adult", "nsfw", "hentai"];
 const LOGIN_WORDS = ["login", "signin", "sign in", "signup", "account blocked", "password"];
 const PORTFOLIO_WORDS = ["portfolio", "resume", "personal website", "developer portfolio"];
-const GAME_WORDS = ["game", "anime", "minecraft", "dle", "movie", "quiz"];
+const GAME_WORDS = [
+  "game",
+  "anime",
+  "minecraft",
+  "dle",
+  "movie",
+  "quiz",
+  "guess",
+  "toon",
+  "cartoon",
+  "color",
+  "memory",
+  "puzzle"
+];
 
 function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -155,6 +196,42 @@ function engagementScore({ stars, forks, openIssues, points, comments, downloads
   );
 }
 
+function parseTimestamp(value) {
+  if (!value) return 0;
+  const text = String(value).trim();
+  if (/^\d{14}$/.test(text)) {
+    return Date.UTC(
+      Number(text.slice(0, 4)),
+      Number(text.slice(4, 6)) - 1,
+      Number(text.slice(6, 8)),
+      Number(text.slice(8, 10)),
+      Number(text.slice(10, 12)),
+      Number(text.slice(12, 14))
+    );
+  }
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function recencyScore(site) {
+  const ts = parseTimestamp(site.lastSeen || site.discoveredAt);
+  if (!ts) return 0;
+  const ageDays = Math.max(0, (Date.now() - ts) / (1000 * 60 * 60 * 24));
+  if (ageDays <= 3) return 28;
+  if (ageDays <= 7) return 22;
+  if (ageDays <= 30) return 14;
+  if (ageDays <= 90) return 8;
+  if (ageDays <= 365) return 3;
+  return 0;
+}
+
+function sourceCount(site) {
+  if (Array.isArray(site.sources) && site.sources.length) {
+    return new Set(site.sources.filter(Boolean)).size;
+  }
+  return site.source ? 1 : 0;
+}
+
 function officialProductHost({ originalUrl, url, canonical, ogUrl }) {
   const originalHost = hostnameFromUrl(originalUrl || url);
   if (!originalHost.endsWith(".vercel.app")) return "";
@@ -196,26 +273,32 @@ export function scoreOpportunity(site) {
 
   const host = safeHost(site.url);
   const text = `${site.title || ""} ${site.description || ""} ${site.h1 || ""} ${host}`;
+  const demandMatches = matchedWords(text, DEMAND_WORDS);
   const toolMatches = matchedWords(text, TOOL_WORDS);
   const commercialMatches = matchedWords(text, COMMERCIAL_WORDS);
   const brandMatches = matchedWords(text, BRAND_RISK_WORDS);
   const adultMatches = matchedWords(text, ADULT_WORDS);
   const loginMatches = matchedWords(text, LOGIN_WORDS);
   const hasOwnDomain = !host.endsWith(".vercel.app");
-  const isReachable = site.httpStatus >= 200 && site.httpStatus < 300;
+  const isReachable = site.httpStatus >= 200 && site.httpStatus < 400;
   const hasSeoBasics = hasText(site.title) && hasText(site.description) && hasText(site.h1);
   const externalSignalScore = engagementScore(site);
+  const freshnessScore = recencyScore(site);
+  const sourcesHit = sourceCount(site);
   const officialHost = officialProductHost(site);
   const hasOfficialProduct = Boolean(officialHost);
 
   const demandScore = clamp(
     24 +
-      (toolMatches.length ? 32 : 0) +
-      (commercialMatches.length ? 18 : 0) +
+      (toolMatches.length ? 28 : 0) +
+      (demandMatches.length ? 10 : 0) +
+      (commercialMatches.length ? 14 : 0) +
       (hasText(site.description) ? 8 : 0) +
       (site.wordCount > 800 ? 8 : 0) +
-      (includesAny(text, GAME_WORDS) ? 6 : 0) +
-      Math.round(externalSignalScore * 0.35)
+      (includesAny(text, GAME_WORDS) ? 8 : 0) +
+      Math.round(externalSignalScore * 0.3) +
+      Math.round(freshnessScore * 0.25) +
+      Math.min(12, Math.max(0, sourcesHit - 1) * 6)
   );
 
   const seoWeaknessScore = clamp(
@@ -255,47 +338,57 @@ export function scoreOpportunity(site) {
   );
 
   let score = Math.round(
-    demandScore * 0.3 +
-      seoWeaknessScore * 0.2 +
-      replicabilityScore * 0.25 +
-      commercialScore * 0.15 +
+    demandScore * 0.28 +
+      seoWeaknessScore * 0.18 +
+      replicabilityScore * 0.22 +
+      commercialScore * 0.14 +
       externalSignalScore * 0.1 +
+      freshnessScore * 0.08 +
       (100 - riskScore) * 0.1
   );
 
-  if (site.source === "Common Crawl") {
+  const sourceLabels = Array.isArray(site.sources) && site.sources.length
+    ? site.sources
+    : site.source
+      ? [site.source]
+      : [];
+
+  if (sourceLabels.includes("Common Crawl")) {
     score += 4;
     signals.push("Common Crawl 收录");
   }
 
-  if (site.source === "URLScan") {
+  if (sourceLabels.includes("URLScan")) {
     score += 3;
-    signals.push("近期开源扫描");
+    signals.push("近期公开扫描");
   }
 
-  if (site.source === "Manual") {
+  if (sourceLabels.includes("Manual")) {
     score += 2;
     signals.push("手动导入");
   }
 
-  if (site.source === "GitHub Repos") {
-    signals.push("GitHub 仓库提及");
+  if (sourceLabels.includes("GitHub Repos")) signals.push("GitHub 仓库提及");
+  if (sourceLabels.includes("GitHub Issues")) signals.push("GitHub 讨论提及");
+  if (sourceLabels.includes("Hacker News")) signals.push("Hacker News 提及");
+  if (sourceLabels.includes("npm")) signals.push("npm 包生态提及");
+  if (sourceLabels.includes("GitLab")) signals.push("GitLab 项目提及");
+  if (sourceLabels.includes("Internet Archive")) signals.push("历史快照收录");
+  if (sourceLabels.includes("crt.sh")) signals.push("证书透明日志");
+
+  if (sourcesHit >= 2) {
+    score += Math.min(10, (sourcesHit - 1) * 4);
+    signals.push(`多源命中 x${sourcesHit}`);
+    categoryTags.push("多源交叉");
   }
 
-  if (site.source === "GitHub Issues") {
-    signals.push("GitHub 讨论提及");
-  }
-
-  if (site.source === "Hacker News") {
-    signals.push("Hacker News 提及");
-  }
-
-  if (site.source === "npm") {
-    signals.push("npm 包生态提及");
-  }
-
-  if (site.source === "GitLab") {
-    signals.push("GitLab 项目提及");
+  if (freshnessScore >= 18) {
+    score += 5;
+    signals.push("近 7 日活跃信号");
+    categoryTags.push("上升/新鲜");
+  } else if (freshnessScore >= 10) {
+    score += 2;
+    signals.push("近 30 日活跃信号");
   }
 
   if (site.stars > 0) signals.push(`stars ${site.stars}`);
@@ -309,6 +402,9 @@ export function scoreOpportunity(site) {
   } else if (site.httpStatus) {
     score -= 18;
     weaknesses.push(`HTTP ${site.httpStatus}`);
+  } else if (site.error) {
+    score -= 12;
+    weaknesses.push("抓取失败");
   }
 
   if (!hasText(site.title)) weaknesses.push("缺少 title");
@@ -399,12 +495,15 @@ export function scoreOpportunity(site) {
     categoryTags: Array.from(new Set(categoryTags)),
     decision,
     fitReason,
+    sources: sourceLabels,
+    sourceCount: sourcesHit,
     scoreBreakdown: {
       demand: { score: demandScore, label: scoreLabel(demandScore) },
       seoGap: { score: seoWeaknessScore, label: scoreLabel(seoWeaknessScore) },
       replicability: { score: replicabilityScore, label: scoreLabel(replicabilityScore) },
       commercial: { score: commercialScore, label: scoreLabel(commercialScore) },
       external: { score: externalSignalScore, label: scoreLabel(externalSignalScore) },
+      freshness: { score: freshnessScore, label: scoreLabel(freshnessScore) },
       risk: { score: riskScore, label: riskScore >= 60 ? "high" : riskScore >= 30 ? "medium" : "low" }
     }
   };

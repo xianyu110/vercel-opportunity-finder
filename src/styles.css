@@ -212,13 +212,25 @@ textarea {
 
 .command-left {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .input-group {
   display: grid;
   gap: 5px;
+}
+
+.decision-filter select {
+  min-width: 88px;
+  width: 96px;
+}
+
+.source-cell {
+  max-width: 140px;
+  font-size: 12px;
+  color: rgba(190, 230, 210, 0.86);
 }
 
 .input-group span {
@@ -244,7 +256,8 @@ textarea {
 }
 
 .input-group select {
-  width: 86px;
+  min-width: 86px;
+  width: auto;
   padding: 0 10px;
 }
 
@@ -310,7 +323,7 @@ textarea {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   margin: 14px 0;
 }

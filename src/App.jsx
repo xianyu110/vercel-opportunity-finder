@@ -21,81 +21,22 @@ import {
   Terminal,
   Zap
 } from "lucide-react";
-import {
-  analyzeUrls,
-  discoverCertificates,
-  discoverCommonCrawl,
-  discoverGithubIssues,
-  discoverGithubRepos,
-  discoverGitlab,
-  discoverHackerNews,
-  discoverInternetArchive,
-  discoverNpm,
-  discoverUrlscan
-} from "./api";
+import { analyzeUrls, discoverAll } from "./api";
 
 const SOURCES = [
-  { key: "commoncrawl", label: "Common Crawl", hint: "公开网页索引" },
-  { key: "urlscan", label: "URLScan", hint: "近期扫描记录" },
-  { key: "githubRepos", label: "GitHub Repos", hint: "仓库描述/主页" },
-  { key: "githubIssues", label: "GitHub Issues", hint: "Issue 讨论" },
-  { key: "hackernews", label: "Hacker News", hint: "HN 提交" },
-  { key: "npm", label: "npm", hint: "包描述/主页" },
-  { key: "gitlab", label: "GitLab", hint: "公开项目" },
-  { key: "internetArchive", label: "Internet Archive", hint: "历史网页快照" },
-  { key: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧" }
+  { key: "commoncrawl", apiKey: "commoncrawl", label: "Common Crawl", hint: "公开网页索引" },
+  { key: "urlscan", apiKey: "urlscan", label: "URLScan", hint: "近期扫描记录" },
+  { key: "githubRepos", apiKey: "github-repos", label: "GitHub Repos", hint: "仓库描述/主页" },
+  { key: "githubIssues", apiKey: "github-issues", label: "GitHub Issues", hint: "Issue 讨论" },
+  { key: "hackernews", apiKey: "hackernews", label: "Hacker News", hint: "HN 提交" },
+  { key: "npm", apiKey: "npm", label: "npm", hint: "包描述/主页" },
+  { key: "gitlab", apiKey: "gitlab", label: "GitLab", hint: "公开项目" },
+  { key: "internetArchive", apiKey: "internet-archive", label: "Internet Archive", hint: "历史网页快照" },
+  { key: "certificates", apiKey: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧" }
 ];
 
-const DISCOVERY_RUNNERS = {
-  commoncrawl: {
-    status: "Common Crawl：拉取候选域名...",
-    limit: (value) => value,
-    discover: discoverCommonCrawl
-  },
-  urlscan: {
-    status: "URLScan：检索近期扫描记录...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverUrlscan
-  },
-  githubRepos: {
-    status: "GitHub Repos：搜索仓库描述和主页...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverGithubRepos
-  },
-  githubIssues: {
-    status: "GitHub Issues：搜索公开讨论...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverGithubIssues
-  },
-  hackernews: {
-    status: "Hacker News：搜索提交记录...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverHackerNews
-  },
-  npm: {
-    status: "npm：搜索包描述和主页...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverNpm
-  },
-  gitlab: {
-    status: "GitLab：搜索公开项目...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverGitlab
-  },
-  internetArchive: {
-    status: "Internet Archive：检索历史快照...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverInternetArchive
-  },
-  certificates: {
-    status: "crt.sh：检索证书透明日志...",
-    limit: (value) => Math.min(value, 100),
-    discover: discoverCertificates
-  }
-};
-
 const DEFAULT_MANUAL = [
-  "rule34dle.vercel.app",
+  "toon-tone.vercel.app",
   "gridmaker.vercel.app",
   "ytp-length.vercel.app"
 ].join("\n");
@@ -133,17 +74,11 @@ function normalizeManualUrls(value) {
     .filter(Boolean);
 }
 
-function pickRandomItems(items, count, excludedHosts = new Set()) {
-  const preferred = items.filter((item) => !excludedHosts.has(hostFromUrl(item.url)));
-  const pool = preferred.length >= count ? preferred : items;
-  const shuffled = [...pool];
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const randomIndex = Math.floor(Math.random() * (index + 1));
-    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+function formatSources(row) {
+  if (Array.isArray(row?.sources) && row.sources.length) {
+    return row.sources.join(" + ");
   }
-
-  return shuffled.slice(0, count);
+  return row?.source || "-";
 }
 
 function readWatchlist() {
@@ -343,6 +278,9 @@ export default function App() {
   const [selectedHost, setSelectedHost] = useState("");
   const [query, setQuery] = useState("");
   const [minScore, setMinScore] = useState(0);
+  const [decisionFilter, setDecisionFilter] = useState("all");
+  const [analyzeLimit, setAnalyzeLimit] = useState(30);
+  const [analyzeMode, setAnalyzeMode] = useState("smart");
   const [showSavedOnly, setShowSavedOnly] = useState(false);
   const [watchlist, setWatchlist] = useState(() => readWatchlist());
   const [loading, setLoading] = useState(false);
@@ -364,22 +302,32 @@ export default function App() {
     return enrichedRows
       .filter((row) => !showSavedOnly || row.watch?.saved)
       .filter((row) => row.score >= minScore)
+      .filter((row) => decisionFilter === "all" || row.decision === decisionFilter)
       .filter((row) => {
         if (!needle) return true;
-        return `${row.url} ${row.title} ${row.keyword} ${row.description} ${row.watch?.note || ""}`
+        return `${row.url} ${row.title} ${row.keyword} ${row.description} ${formatSources(row)} ${row.watch?.note || ""}`
           .toLowerCase()
           .includes(needle);
       })
       .sort((a, b) => b.score - a.score);
-  }, [enrichedRows, query, minScore, showSavedOnly]);
+  }, [enrichedRows, query, minScore, showSavedOnly, decisionFilter]);
 
   const stats = useMemo(() => {
     const hot = enrichedRows.filter((row) => row.decision === "值得").length;
+    const watch = enrichedRows.filter((row) => row.decision === "观察").length;
     const reachable = enrichedRows.filter((row) => row.ok).length;
-    const weak = enrichedRows.filter((row) => (row.weaknesses || []).length >= 2).length;
+    const multi = enrichedRows.filter((row) => (row.sources || []).length >= 2).length;
     const saved = Object.values(watchlist).filter((entry) => entry?.saved).length;
-    return { total: enrichedRows.length, hot, reachable, weak, saved };
-  }, [enrichedRows, watchlist]);
+    return {
+      total: enrichedRows.length,
+      pool: candidatePool.length,
+      hot,
+      watch,
+      reachable,
+      multi,
+      saved
+    };
+  }, [enrichedRows, watchlist, candidatePool.length]);
 
   const reportRows = useMemo(() => {
     const savedRows = enrichedRows.filter((row) => row.watch?.saved);
@@ -438,25 +386,33 @@ export default function App() {
     }));
   }
 
-  async function analyzeBatch(candidates, { excludedHosts = new Set(), reason = "random" } = {}) {
-    const analyzeLimit = Math.min(candidates.length, 30);
-    const targets = pickRandomItems(candidates, analyzeLimit, excludedHosts);
-    const modeLabel = reason === "reshuffle" ? "换一批" : "随机抽样";
+  async function analyzeBatch(candidates, { excludedHosts = [], reason = "discover" } = {}) {
+    const batchSize = Math.min(candidates.length, analyzeLimit);
+    const modeLabel =
+      reason === "reshuffle"
+        ? "换一批"
+        : analyzeMode === "smart"
+          ? "智能优先"
+          : "随机抽样";
 
     setRows([]);
     setSelectedHost("");
-    setStatus(`候选池 ${candidates.length} 个，${modeLabel}分析 ${targets.length} 个...`);
+    setStatus(`候选池 ${candidates.length} 个，${modeLabel}深度分析 ${batchSize} 个...`);
 
     const analyzed = await analyzeUrls({
-      urls: targets,
-      limit: analyzeLimit,
-      source: "Discovery"
+      urls: candidates,
+      limit: batchSize,
+      source: "Discovery",
+      mode: analyzeMode,
+      excludedHosts
     });
 
-    const sorted = analyzed.items.sort((a, b) => b.score - a.score);
+    const sorted = (analyzed.items || []).sort((a, b) => b.score - a.score);
     setRows(sorted);
     setSelectedHost(sorted[0]?.host || "");
-    setStatus(`完成：候选池 ${candidates.length} 个，已${modeLabel}分析 ${sorted.length} 个，按机会分排序。`);
+    setStatus(
+      `完成：候选池 ${candidates.length} 个，已${modeLabel}分析 ${sorted.length} 个（池内 ${analyzed.poolSize || candidates.length}），按机会分排序。`
+    );
   }
 
   async function runDiscovery() {
@@ -467,38 +423,77 @@ export default function App() {
     setSelectedHost("");
 
     try {
-      const discovered = [];
+      const activeSources = SOURCES.filter((source) => selectedSources[source.key]).map(
+        (source) => source.apiKey
+      );
+
+      setStatus(
+        activeSources.length
+          ? `并行发现中（${activeSources.length} 个数据源）...`
+          : "仅使用手动 URL..."
+      );
+
+      let discovered = [];
       const sourceErrors = [];
 
-      for (const source of SOURCES) {
-        const runner = DISCOVERY_RUNNERS[source.key];
-        if (!selectedSources[source.key] || !runner) continue;
-
-        setStatus(runner.status);
+      if (activeSources.length) {
         try {
-          const payload = await runner.discover({
+          const payload = await discoverAll({
             suffix,
-            limit: runner.limit(limit)
+            limit,
+            sources: activeSources
           });
-          discovered.push(...(payload.items || []));
+          discovered = payload.items || [];
+          if (Array.isArray(payload.errors) && payload.errors.length) {
+            sourceErrors.push(...payload.errors);
+          }
+          if (Array.isArray(payload.sources)) {
+            const summary = payload.sources
+              .map((item) => `${item.source || item.key}:${item.count || 0}`)
+              .join(" · ");
+            if (summary) setStatus(`发现完成：${summary}`);
+          }
         } catch (err) {
-          sourceErrors.push(`${source.label}：${err.message || "检索失败"}`);
+          sourceErrors.push(err.message || "并行发现失败");
         }
       }
 
       const manual = normalizeManualUrls(manualUrls).map((url) => ({
         url,
-        source: "Manual"
+        source: "Manual",
+        sources: ["Manual"]
       }));
-      discovered.push(...manual);
+      discovered = [...discovered, ...manual];
 
-      const seen = new Set();
-      const unique = discovered.filter((item) => {
+      // Client-side host merge as a safety net
+      const merged = new Map();
+      for (const item of discovered) {
         const host = hostFromUrl(item.url);
-        if (!host || seen.has(host)) return false;
-        seen.add(host);
-        return true;
-      });
+        if (!host) continue;
+        const prev = merged.get(host);
+        if (!prev) {
+          merged.set(host, {
+            ...item,
+            host,
+            sources: Array.from(
+              new Set([...(item.sources || []), item.source].filter(Boolean))
+            )
+          });
+          continue;
+        }
+        merged.set(host, {
+          ...prev,
+          ...item,
+          host,
+          sources: Array.from(
+            new Set([...(prev.sources || []), ...(item.sources || []), item.source].filter(Boolean))
+          ),
+          stars: Math.max(prev.stars || 0, item.stars || 0),
+          points: Math.max(prev.points || 0, item.points || 0),
+          downloadsWeekly: Math.max(prev.downloadsWeekly || 0, item.downloadsWeekly || 0)
+        });
+      }
+      const unique = Array.from(merged.values());
 
       if (!unique.length) {
         setStatus("没有拿到候选域名，可以粘贴手动 URL 再分析。");
@@ -526,7 +521,7 @@ export default function App() {
     setError("");
 
     try {
-      const currentHosts = new Set(rows.map((row) => row.host));
+      const currentHosts = rows.map((row) => row.host).filter(Boolean);
       await analyzeBatch(candidatePool, {
         excludedHosts: currentHosts,
         reason: "reshuffle"
@@ -597,7 +592,9 @@ export default function App() {
             <ShieldAlert size={15} />
             评分逻辑
           </div>
-          <p>按需求、SEO 缺口、可复制性、商业化和风险五维评分，直接给出值得、观察或放弃。</p>
+          <p>
+            并行发现多源候选，按域名合并后智能优先分析。综合需求、SEO 缺口、可复制性、商业化、外部热度、新鲜度与风险，输出值得 / 观察 / 放弃。
+          </p>
         </section>
       </aside>
 
@@ -609,12 +606,34 @@ export default function App() {
               <input value={suffix} onChange={(event) => setSuffix(event.target.value)} />
             </label>
             <label className="input-group">
-              <span>数量</span>
+              <span>发现量</span>
               <select value={limit} onChange={(event) => setLimit(Number(event.target.value))}>
                 <option value={20}>20</option>
                 <option value={40}>40</option>
                 <option value={80}>80</option>
                 <option value={150}>150</option>
+              </select>
+            </label>
+            <label className="input-group">
+              <span>分析量</span>
+              <select
+                value={analyzeLimit}
+                onChange={(event) => setAnalyzeLimit(Number(event.target.value))}
+              >
+                <option value={15}>15</option>
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+                <option value={80}>80</option>
+              </select>
+            </label>
+            <label className="input-group">
+              <span>抽样</span>
+              <select
+                value={analyzeMode}
+                onChange={(event) => setAnalyzeMode(event.target.value)}
+              >
+                <option value="smart">智能优先</option>
+                <option value="random">随机</option>
               </select>
             </label>
             <button className="primary-btn" onClick={runDiscovery} disabled={loading}>
@@ -655,9 +674,11 @@ export default function App() {
         {error ? <div className="error-line">{error}</div> : null}
 
         <section className="kpi-grid">
-          <Kpi icon={<Globe2 size={18} />} label="候选站" value={stats.total} />
+          <Kpi icon={<Radar size={18} />} label="候选池" value={stats.pool || stats.total} />
+          <Kpi icon={<Globe2 size={18} />} label="已分析" value={stats.total} />
           <Kpi icon={<Zap size={18} />} label="值得做" value={stats.hot} />
-          <Kpi icon={<Eye size={18} />} label="可访问" value={stats.reachable} />
+          <Kpi icon={<Eye size={18} />} label="观察中" value={stats.watch} />
+          <Kpi icon={<Binary size={18} />} label="多源命中" value={stats.multi} />
           <Kpi icon={<Bookmark size={18} />} label="已收藏" value={stats.saved} />
         </section>
 
@@ -683,6 +704,18 @@ export default function App() {
                   value={minScore}
                   onChange={(event) => setMinScore(Number(event.target.value))}
                 />
+              </label>
+              <label className="input-group decision-filter">
+                <span>结论</span>
+                <select
+                  value={decisionFilter}
+                  onChange={(event) => setDecisionFilter(event.target.value)}
+                >
+                  <option value="all">全部</option>
+                  <option value="值得">值得</option>
+                  <option value="观察">观察</option>
+                  <option value="放弃">放弃</option>
+                </select>
               </label>
               <button
                 className={showSavedOnly ? "toggle-chip active" : "toggle-chip"}
@@ -741,7 +774,9 @@ export default function App() {
                       <td>
                         <DecisionBadge decision={row.decision} />
                       </td>
-                      <td>{row.source}</td>
+                      <td className="truncate source-cell" title={formatSources(row)}>
+                        {formatSources(row)}
+                      </td>
                       <td className="truncate">{row.title || row.ogTitle || "-"}</td>
                       <td className="keyword-cell">
                         <span>{row.keyword || "-"}</span>
@@ -947,7 +982,17 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
           <MetricBar label="可复制性" metric={site.scoreBreakdown?.replicability} />
           <MetricBar label="商业化" metric={site.scoreBreakdown?.commercial} />
           <MetricBar label="外部热度" metric={site.scoreBreakdown?.external} />
+          <MetricBar label="新鲜度" metric={site.scoreBreakdown?.freshness} />
           <MetricBar label="风险" metric={site.scoreBreakdown?.risk} invert />
+        </div>
+      </section>
+
+      <section>
+        <h3>数据源</h3>
+        <div className="tag-list">
+          {(site.sources || [site.source]).filter(Boolean).map((item) => (
+            <span key={item}>{item}</span>
+          ))}
         </div>
       </section>
 

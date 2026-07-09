@@ -20,6 +20,11 @@
 - 支持收藏机会、填写阶段和备注，并保存到浏览器本地。
 - 支持筛选、导出 CSV、导出 Markdown 机会池报告。
 - 默认是快速模式：先发现候选，再深度分析前 30 个，避免大量外站超时导致页面像卡死。
+- **并行发现**：多数据源同时拉取，不再串行等待。
+- **多源合并**：同一域名跨源命中会合并 stars / HN / npm 等信号，并标记「多源交叉」。
+- **智能优先分析**：优先分析有需求词、热度、近期活跃、多源命中的候选（也可切回随机）。
+- **新鲜度维度**：结合 lastSeen 判断近 7/30 日活跃，帮助捕捉上升中的词。
+- **结论筛选**：表格可按 值得 / 观察 / 放弃 过滤。
 
 ## 技术栈
 
@@ -53,6 +58,22 @@ API 默认运行在：
 ```bash
 http://127.0.0.1:4174/
 ```
+
+可选：设置 `GITHUB_TOKEN`（或 `GH_TOKEN`）提高 GitHub Search API 限额：
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+npm run dev
+```
+
+## 优化后的常用流程
+
+1. 勾选数据源，设置「发现量」和「分析量」。
+2. 抽样模式选 **智能优先**（默认），点「开始发现」。
+3. 系统并行拉取各源 → 按 host 合并 → 优先分析高信号候选。
+4. 用「结论」筛选只看 **值得**，再点验证入口（Google / Trends / GitHub / Reddit / PH）。
+5. 对有价值的站收藏、改阶段、写备注；不够时点「换一批」。
+6. 导出 CSV 或 Markdown 机会池报告。
 
 ## GitHub Pages + Cloudflare Worker 部署
 
@@ -145,13 +166,24 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 
 工具会综合以下维度生成机会分和结论：
 
-- 需求信号：是否像工具站、查询站、生成器、计算器等明确需求。
+- 需求信号：是否像工具站、查询站、生成器、计算器、颜色/游戏等明确需求。
 - SEO 缺口：是否缺少 title、description、H1、canonical 等基础 SEO。
 - 可复制性：是否适合做一个更完整的自有域名版本。
 - 商业化潜力：是否包含模板、PDF、YouTube、AI、设计、视频等可变现关键词。
 - 外部热度：是否有 GitHub stars/forks/issues、HN points/comments、npm downloads 等公开热度。
+- 新鲜度：lastSeen / 快照时间是否集中在近 7–30 日（上升/新鲜信号）。
+- 多源交叉：同一 host 被多个公开索引同时提到时加分。
 - 风险：是否疑似品牌仿站、登录/账号页、成人内容或其他不适合复刻的页面。
 - 已有正式产品：如果 `*.vercel.app` 子域已跳转到同品牌自有域名，或页面 `canonical` / `og:url` 指向同品牌正式站，会标记为已有正式产品并降权。
+
+## API 速览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/discover/*` | 单源发现（兼容旧调用） |
+| POST | `/api/discover` | 并行多源发现 `body: { suffix, limit, sources[] }` |
+| POST | `/api/analyze` | 深度分析 `body: { urls, limit, mode: "smart"\|"random", excludedHosts[] }` |
 
 ## 注意
 
