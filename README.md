@@ -27,7 +27,13 @@
 - **结论筛选**：表格可按 值得 / 观察 / 放弃 过滤。
 - **扫描动量（上升代理）**：用 URLScan 近 7 日 vs 前 7 日扫描次数估计「注意力是否在涨」。
 - **历史机会池**：每次分析写入 `data/snapshots/`，并做日环比（上升 / 新出现 / 回落）。
-- **更多数据源**：Reddit、Product Hunt（公开搜索 best-effort）、Stack Overflow。
+- **更多数据源**：Reddit、Bluesky、Product Hunt（公开搜索 best-effort）、Stack Overflow。
+- **CLI 日扫**：`npm run scan` / `npm run scan:cron`，输出 Markdown 上升日报到 `reports/`。
+- **上升榜操作**：侧边栏复扫上升 host、点击历史快照复扫、导出上升报告。
+- **本地日环比兜底**：即使 Worker 无磁盘历史，浏览器 localStorage 也会做环比。
+- **竞争密度**：关键词启发式 + DuckDuckGo 同类结果，识别红海词（如 youtube playlist length）。
+- **成熟度降权**：博客/多工具/FAQ/长内容等信号，避免把已成型产品标成「值得」。
+- **可赢性**：综合 SEO 缺口、成熟度、竞争，过滤「需求真但别做」的误判。
 
 ## 技术栈
 
@@ -48,6 +54,37 @@
 ```bash
 npm install
 npm run dev
+```
+
+### CLI 定时找词（推荐每天跑）
+
+先开 API，或用 `--start-api` 自动拉起：
+
+```bash
+# 终端 A
+npm run dev:api
+
+# 终端 B
+npm run scan
+
+# 或一条命令（自动起 API）
+npm run scan:cron -- --limit 40 --analyze 25
+```
+
+可选参数：
+
+```bash
+npm run scan -- \
+  --sources urlscan,reddit,bluesky,github-repos,hackernews \
+  --analyze 30 \
+  --out reports/my-daily.md \
+  --json-out reports/my-daily.json
+```
+
+macOS `launchd` / Linux `cron` 示例（每天 9:00）：
+
+```cron
+0 9 * * * cd /path/to/vercel-opportunity-finder && /usr/local/bin/npm run scan:cron >> /tmp/vof-scan.log 2>&1
 ```
 
 打开 Vite 输出的本地地址，通常是：
@@ -201,6 +238,17 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 - 本地运行会把快照写到 `data/snapshots/`（已 gitignore）。
 - Cloudflare Worker **不持久化**历史；前端会额外写入 `localStorage` 作备份。
 - Product Hunt 使用公开 Algolia 搜索，密钥若轮换会失败（默认关闭该源）。
+
+### 竞争 / 成熟度 / 可赢性
+
+| 维度 | 含义 | 高分意味着 |
+|------|------|------------|
+| 竞争密度 | 关键词是否红海 | 后发难做，倾向观察/放弃 |
+| 成熟度 | 对方是否已运营成型 | 不宜 1:1 复刻 |
+| 可赢性 | 是否还有切入窗口 | 高才配「值得」 |
+
+**「值得」门槛（简化）：** 需求够 + 可赢性够 + 竞争不太高 + 成熟度不太高 + 风险可控。  
+像 `ytp-length` 这类「需求真、页面完整、词很卷」会被标成 **观察/放弃**，并提示「借鉴需求，不正面复刻」。
 
 ## 注意
 

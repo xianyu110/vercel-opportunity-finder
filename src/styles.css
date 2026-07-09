@@ -293,6 +293,61 @@ textarea {
   background: rgba(0, 0, 0, 0.22);
 }
 
+.history-item-btn {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.history-item-btn:hover:not(:disabled) {
+  border-color: rgba(68, 255, 150, 0.4);
+  background: rgba(0, 40, 20, 0.45);
+}
+
+.history-item-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rising-board {
+  margin-top: 4px;
+}
+
+.rising-row {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(68, 255, 150, 0.08);
+}
+
+.rising-row strong {
+  font-size: 12px;
+  color: #d9ffe8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rising-row small {
+  color: #7fba8d;
+  font-size: 11px;
+}
+
+.history-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mini-btn {
+  height: 32px !important;
+  padding: 0 8px !important;
+  font-size: 12px;
+}
+
 .history-item strong {
   font-size: 12px;
   color: #e9fff0;

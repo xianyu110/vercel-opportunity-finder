@@ -22,7 +22,21 @@ import {
   TrendingUp,
   Zap
 } from "lucide-react";
-import { analyzeUrls, discoverAll, listHistory, getHistoryRising } from "./api";
+import {
+  analyzeUrls,
+  discoverAll,
+  listHistory,
+  getHistoryRising,
+  getHistorySnapshot
+} from "./api";
+import {
+  pushLocalHistorySnapshot,
+  getLocalSnapshots,
+  getLocalSnapshot,
+  enrichWithLocalHistory,
+  needsLocalHistoryFallback,
+  buildRisingExport
+} from "./historyClient";
 
 const SOURCES = [
   { key: "commoncrawl", apiKey: "commoncrawl", label: "Common Crawl", hint: "公开网页索引", defaultOn: true },
@@ -33,13 +47,12 @@ const SOURCES = [
   { key: "npm", apiKey: "npm", label: "npm", hint: "包描述/主页", defaultOn: true },
   { key: "gitlab", apiKey: "gitlab", label: "GitLab", hint: "公开项目", defaultOn: true },
   { key: "reddit", apiKey: "reddit", label: "Reddit", hint: "公开讨论链接", defaultOn: true },
+  { key: "bluesky", apiKey: "bluesky", label: "Bluesky", hint: "公开帖子搜索", defaultOn: true },
   { key: "producthunt", apiKey: "producthunt", label: "Product Hunt", hint: "PH 公开搜索", defaultOn: false },
   { key: "stackoverflow", apiKey: "stackoverflow", label: "Stack Overflow", hint: "问答提及", defaultOn: false },
   { key: "internetArchive", apiKey: "internet-archive", label: "Internet Archive", hint: "历史网页快照", defaultOn: false },
   { key: "certificates", apiKey: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧", defaultOn: false }
 ];
-
-const LOCAL_HISTORY_KEY = "vercel-opportunity-finder.local-history.v1";
 
 const DEFAULT_MANUAL = [
   "toon-tone.vercel.app",
@@ -100,48 +113,6 @@ function readWatchlist() {
 
 function writeWatchlist(next) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-}
-
-function readLocalHistory() {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(LOCAL_HISTORY_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeLocalHistory(entries) {
-  const trimmed = (entries || []).slice(0, 30);
-  window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(trimmed));
-}
-
-function pushLocalHistorySnapshot({ suffix, items, meta }) {
-  const hosts = {};
-  for (const item of items || []) {
-    if (!item?.host) continue;
-    hosts[item.host] = {
-      host: item.host,
-      score: item.score || 0,
-      decision: item.decision || "观察",
-      keyword: item.keyword || "",
-      scanCount7d: item.scanCount7d || 0,
-      scanMomentum: item.scanMomentum || 0,
-      sources: item.sources || []
-    };
-  }
-  const entry = {
-    id: new Date().toISOString().replace(/[:.]/g, "-"),
-    createdAt: new Date().toISOString(),
-    suffix,
-    hostCount: Object.keys(hosts).length,
-    hosts,
-    meta: meta || {}
-  };
-  const next = [entry, ...readLocalHistory().filter((row) => row.id !== entry.id)];
-  writeLocalHistory(next);
-  return entry;
 }
 
 function defaultWatchEntry(row) {
@@ -322,12 +293,15 @@ export default function App() {
   const [analyzeLimit, setAnalyzeLimit] = useState(30);
   const [analyzeMode, setAnalyzeMode] = useState("smart");
   const [enrichMomentum, setEnrichMomentum] = useState(true);
+  const [enrichCompetition, setEnrichCompetition] = useState(true);
   const [saveHistory, setSaveHistory] = useState(true);
   const [showSavedOnly, setShowSavedOnly] = useState(false);
   const [showRisingOnly, setShowRisingOnly] = useState(false);
+  const [showWinnableOnly, setShowWinnableOnly] = useState(false);
   const [watchlist, setWatchlist] = useState(() => readWatchlist());
   const [historySnapshots, setHistorySnapshots] = useState([]);
   const [risingSummary, setRisingSummary] = useState(null);
+  const [risingBoard, setRisingBoard] = useState([]);
   const [lastSnapshot, setLastSnapshot] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("待命：选择数据源后开始扫描。");
@@ -360,17 +334,30 @@ export default function App() {
         );
       })
       .filter((row) => {
+        if (!showWinnableOnly) return true;
+        return (
+          (row.winabilityScore || 0) >= 55 &&
+          (row.competitionScore || 0) < 70 &&
+          (row.maturityScore || 0) < 70 &&
+          row.decision !== "放弃"
+        );
+      })
+      .filter((row) => {
         if (!needle) return true;
         return `${row.url} ${row.title} ${row.keyword} ${row.description} ${formatSources(row)} ${row.watch?.note || ""}`
           .toLowerCase()
           .includes(needle);
       })
       .sort((a, b) => {
+        if (showWinnableOnly) {
+          const winDiff = (b.winabilityScore || 0) - (a.winabilityScore || 0);
+          if (winDiff !== 0) return winDiff;
+        }
         const risingDiff = (b.history?.risingScore || b.scanMomentum || 0) - (a.history?.risingScore || a.scanMomentum || 0);
         if (showRisingOnly && risingDiff !== 0) return risingDiff;
         return b.score - a.score;
       });
-  }, [enrichedRows, query, minScore, showSavedOnly, decisionFilter, showRisingOnly]);
+  }, [enrichedRows, query, minScore, showSavedOnly, decisionFilter, showRisingOnly, showWinnableOnly]);
 
   const stats = useMemo(() => {
     const hot = enrichedRows.filter((row) => row.decision === "值得").length;
@@ -459,27 +446,79 @@ export default function App() {
   async function refreshHistorySidebar() {
     try {
       const payload = await listHistory({ suffix, limit: 12 });
-      setHistorySnapshots(payload.snapshots || []);
+      const serverSnaps = payload.snapshots || [];
+      const localSnaps = getLocalSnapshots({ suffix, limit: 12 });
+      // Prefer server list; merge local-only ids.
+      const seen = new Set(serverSnaps.map((row) => row.id));
+      setHistorySnapshots([
+        ...serverSnaps,
+        ...localSnaps.filter((row) => !seen.has(row.id))
+      ]);
     } catch {
-      setHistorySnapshots(
-        readLocalHistory()
-          .filter((row) => !suffix || row.suffix === suffix)
-          .map((row) => ({
-            id: row.id,
-            createdAt: row.createdAt,
-            suffix: row.suffix,
-            hostCount: row.hostCount,
-            local: true
-          }))
-      );
+      setHistorySnapshots(getLocalSnapshots({ suffix, limit: 12 }));
     }
 
     try {
-      const rising = await getHistoryRising({ suffix, limit: 10 });
+      const rising = await getHistoryRising({ suffix, limit: 15 });
       setRisingSummary(rising);
+      setRisingBoard(rising.items || rising.comparison?.rising || []);
     } catch {
+      // Derive board from current rows if API unavailable.
       setRisingSummary(null);
+      setRisingBoard(
+        rows
+          .filter(
+            (row) =>
+              row.history?.label === "上升" ||
+              row.history?.isNew ||
+              (row.scanMomentum || 0) >= 40
+          )
+          .map((row) => ({
+            host: row.host,
+            label: row.history?.label || "扫描上升",
+            risingScore: row.history?.risingScore || row.scanMomentum || 0,
+            currentScore: row.score,
+            scoreDelta: row.history?.scoreDelta
+          }))
+          .slice(0, 15)
+      );
     }
+  }
+
+  function applyAnalyzedItems(items, { reason = "discover", analyzed = {} } = {}) {
+    let nextItems = [...(items || [])];
+
+    // Save local snapshot first so fallback can see previous runs.
+    if (saveHistory) {
+      pushLocalHistorySnapshot({
+        suffix,
+        items: nextItems,
+        meta: { mode: analyzeMode, reason }
+      });
+    }
+
+    if (needsLocalHistoryFallback(nextItems)) {
+      const local = enrichWithLocalHistory(nextItems, { suffix });
+      nextItems = local.items;
+      if (local.comparison) {
+        setRisingSummary({
+          comparison: local.comparison,
+          previous: local.previous
+        });
+        setRisingBoard(local.comparison.rising || []);
+      }
+    } else if (analyzed.rising) {
+      setRisingBoard(analyzed.rising);
+      setRisingSummary({
+        comparison: { summary: analyzed.history?.summary, rising: analyzed.rising },
+        previous: analyzed.history?.previous
+      });
+    }
+
+    const sorted = nextItems.sort((a, b) => b.score - a.score);
+    setRows(sorted);
+    setSelectedHost(sorted[0]?.host || "");
+    return sorted;
   }
 
   async function analyzeBatch(candidates, { excludedHosts = [], reason = "discover" } = {}) {
@@ -487,46 +526,42 @@ export default function App() {
     const modeLabel =
       reason === "reshuffle"
         ? "换一批"
-        : analyzeMode === "smart"
-          ? "智能优先"
-          : "随机抽样";
+        : reason === "rising"
+          ? "上升复扫"
+          : reason === "snapshot"
+            ? "快照复扫"
+            : analyzeMode === "smart"
+              ? "智能优先"
+              : "随机抽样";
 
     setRows([]);
     setSelectedHost("");
     setStatus(
-      `候选池 ${candidates.length} 个，${modeLabel}分析 ${batchSize} 个${
-        enrichMomentum ? " + 扫描动量" : ""
-      }...`
+      `候选池 ${candidates.length} 个，${modeLabel}分析 ${batchSize} 个` +
+        `${enrichMomentum ? " + 动量" : ""}${enrichCompetition ? " + 竞争" : ""}...`
     );
 
     const analyzed = await analyzeUrls({
       urls: candidates,
       limit: batchSize,
-      source: "Discovery",
-      mode: analyzeMode,
+      source: reason === "rising" ? "Rising" : "Discovery",
+      mode: reason === "rising" ? "smart" : analyzeMode,
       excludedHosts,
       suffix,
       enrichMomentum,
+      enrichCompetition,
       saveHistory
     });
 
-    const sorted = (analyzed.items || []).sort((a, b) => b.score - a.score);
-    setRows(sorted);
-    setSelectedHost(sorted[0]?.host || "");
-
-    if (saveHistory) {
-      pushLocalHistorySnapshot({
-        suffix,
-        items: sorted,
-        meta: { mode: analyzeMode, reason }
-      });
-    }
+    const sorted = applyAnalyzedItems(analyzed.items || [], { reason, analyzed });
 
     if (analyzed.snapshot) {
       setLastSnapshot(analyzed.snapshot);
     }
 
-    const risingCount = analyzed.rising?.length || sorted.filter((row) => row.history?.label === "上升" || row.history?.isNew).length;
+    const risingCount = sorted.filter(
+      (row) => row.history?.label === "上升" || row.history?.isNew || (row.scanMomentum || 0) >= 40
+    ).length;
     const momentumHits = sorted.filter((row) => (row.scanMomentum || 0) >= 40).length;
     setStatus(
       `完成：分析 ${sorted.length}/${analyzed.poolSize || candidates.length} · 上升 ${risingCount} · 扫描动量高 ${momentumHits}` +
@@ -534,6 +569,97 @@ export default function App() {
     );
 
     await refreshHistorySidebar();
+  }
+
+  async function reanalyzeRising() {
+    const hosts = risingBoard.map((row) => row.host).filter(Boolean);
+    if (!hosts.length) {
+      // fallback to current rising rows
+      const fromRows = rows
+        .filter(
+          (row) =>
+            row.history?.label === "上升" ||
+            row.history?.isNew ||
+            (row.scanMomentum || 0) >= 40
+        )
+        .map((row) => row.host);
+      if (!fromRows.length) {
+        setError("暂无上升 host 可复扫，先跑一轮发现。");
+        return;
+      }
+      setLoading(true);
+      setError("");
+      try {
+        await analyzeBatch(
+          fromRows.map((host) => ({ url: `https://${host}/`, source: "Rising", sources: ["Rising"] })),
+          { reason: "rising" }
+        );
+      } catch (err) {
+        setError(err.message || "上升复扫失败");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      await analyzeBatch(
+        hosts.map((host) => ({ url: `https://${host}/`, source: "Rising", sources: ["Rising"] })),
+        { reason: "rising" }
+      );
+      setShowRisingOnly(true);
+    } catch (err) {
+      setError(err.message || "上升复扫失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadSnapshotForRescan(snapshotMeta) {
+    if (!snapshotMeta?.id) return;
+    setLoading(true);
+    setError("");
+    try {
+      let hosts = [];
+      try {
+        const payload = await getHistorySnapshot(snapshotMeta.id);
+        hosts = Object.keys(payload.snapshot?.hosts || {});
+      } catch {
+        const local = getLocalSnapshot(snapshotMeta.id);
+        hosts = Object.keys(local?.hosts || {});
+      }
+
+      if (!hosts.length) {
+        throw new Error("快照里没有 host");
+      }
+
+      setCandidatePool(
+        hosts.map((host) => ({
+          url: `https://${host}/`,
+          source: "Snapshot",
+          sources: ["Snapshot"]
+        }))
+      );
+      await analyzeBatch(
+        hosts.map((host) => ({ url: `https://${host}/`, source: "Snapshot", sources: ["Snapshot"] })),
+        { reason: "snapshot" }
+      );
+      setStatus(`已从快照 ${snapshotMeta.id.slice(0, 19)} 复扫 ${hosts.length} 个 host`);
+    } catch (err) {
+      setError(err.message || "加载快照失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function exportRisingReport() {
+    const content = buildRisingExport(enrichedRows, { suffix });
+    downloadTextFile({
+      content,
+      filename: `vercel-rising-${new Date().toISOString().slice(0, 10)}.md`
+    });
   }
 
   async function runDiscovery() {
@@ -726,13 +852,20 @@ export default function App() {
           <div className="history-list">
             {historySnapshots.length ? (
               historySnapshots.slice(0, 8).map((snap) => (
-                <div className="history-item" key={snap.id}>
+                <button
+                  type="button"
+                  className="history-item history-item-btn"
+                  key={snap.id}
+                  onClick={() => loadSnapshotForRescan(snap)}
+                  disabled={loading}
+                  title="点击用该快照 host 复扫"
+                >
                   <strong>{formatDate(snap.createdAt)}</strong>
                   <small>
                     {snap.hostCount || 0} hosts
-                    {snap.local ? " · local" : ""}
+                    {snap.local ? " · local" : ""} · 复扫
                   </small>
-                </div>
+                </button>
               ))
             ) : (
               <p className="history-empty">扫描后自动写入快照，用于日环比。</p>
@@ -748,6 +881,47 @@ export default function App() {
               </span>
             </div>
           ) : null}
+
+          <div className="rising-board">
+            <div className="side-title" style={{ marginTop: 12 }}>
+              <TrendingUp size={15} />
+              上升榜
+            </div>
+            {risingBoard.length ? (
+              risingBoard.slice(0, 8).map((row) => (
+                <div className="rising-row" key={row.host}>
+                  <strong title={row.host}>{row.host.replace(/\.vercel\.app$/, "")}</strong>
+                  <small>
+                    {row.label || "上升"} · {row.risingScore ?? "-"}
+                    {typeof row.scoreDelta === "number" ? ` · Δ${row.scoreDelta}` : ""}
+                  </small>
+                </div>
+              ))
+            ) : (
+              <p className="history-empty">跑完扫描后显示上升 host。</p>
+            )}
+            <div className="history-actions">
+              <button
+                type="button"
+                className="ghost-btn mini-btn"
+                onClick={reanalyzeRising}
+                disabled={loading || !risingBoard.length}
+              >
+                <TrendingUp size={14} />
+                复扫上升
+              </button>
+              <button
+                type="button"
+                className="ghost-btn mini-btn"
+                onClick={exportRisingReport}
+                disabled={!enrichedRows.length}
+              >
+                <Download size={14} />
+                导出上升
+              </button>
+            </div>
+          </div>
+
           {lastSnapshot ? (
             <p className="history-empty">最近快照：{lastSnapshot.id.slice(0, 19)}</p>
           ) : null}
@@ -800,6 +974,14 @@ export default function App() {
               />
               <span>扫描动量</span>
             </label>
+            <label className="toggle-inline" title="关键词竞争/红海检测（DuckDuckGo+启发式）">
+              <input
+                type="checkbox"
+                checked={enrichCompetition}
+                onChange={(event) => setEnrichCompetition(event.target.checked)}
+              />
+              <span>竞争密度</span>
+            </label>
             <label className="toggle-inline" title="写入 data/snapshots 与本地历史">
               <input
                 type="checkbox"
@@ -835,6 +1017,14 @@ export default function App() {
             >
               <Download size={16} />
               导出报告
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={exportRisingReport}
+              disabled={!enrichedRows.length}
+            >
+              <TrendingUp size={16} />
+              导出上升
             </button>
           </div>
           <div className="system-status">
@@ -897,6 +1087,13 @@ export default function App() {
                 只看上升
               </button>
               <button
+                className={showWinnableOnly ? "toggle-chip active" : "toggle-chip"}
+                onClick={() => setShowWinnableOnly((value) => !value)}
+              >
+                <Zap size={14} />
+                只看可切入
+              </button>
+              <button
                 className={showSavedOnly ? "toggle-chip active" : "toggle-chip"}
                 onClick={() => setShowSavedOnly((value) => !value)}
               >
@@ -917,6 +1114,7 @@ export default function App() {
                     </th>
                     <th>Decision</th>
                     <th>Trend</th>
+                    <th>Win</th>
                     <th>Source</th>
                     <th>Title</th>
                     <th>Keyword</th>
@@ -956,6 +1154,9 @@ export default function App() {
                       <td>
                         <TrendBadge row={row} />
                       </td>
+                      <td>
+                        <WinBadge row={row} />
+                      </td>
                       <td className="truncate source-cell" title={formatSources(row)}>
                         {formatSources(row)}
                       </td>
@@ -976,7 +1177,7 @@ export default function App() {
                   ))}
                   {!filteredRows.length ? (
                     <tr>
-                      <td colSpan="9" className="empty-state">
+                      <td colSpan="10" className="empty-state">
                         {loading ? "正在扫描矩阵信号..." : "暂无数据，点击开始发现。"}
                       </td>
                     </tr>
@@ -1043,6 +1244,40 @@ function TrendBadge({ row }) {
   }
 
   return <span className="trend-badge trend-flat">·</span>;
+}
+
+function WinBadge({ row }) {
+  const win = row?.winabilityScore || 0;
+  const comp = row?.competitionScore || 0;
+  const mat = row?.maturityScore || 0;
+  const title = `可赢性 ${win} · 竞争 ${comp}${row?.competitionLabel ? `/${row.competitionLabel}` : ""} · 成熟度 ${mat}${row?.maturityLabel ? `/${row.maturityLabel}` : ""}`;
+
+  if (comp >= 75 || (comp >= 65 && mat >= 60)) {
+    return (
+      <span className="trend-badge trend-down" title={title}>
+        红海
+      </span>
+    );
+  }
+  if (win >= 60 && mat < 70 && comp < 70) {
+    return (
+      <span className="trend-badge trend-up" title={title}>
+        可切
+      </span>
+    );
+  }
+  if (mat >= 70) {
+    return (
+      <span className="trend-badge trend-flat" title={title}>
+        成型
+      </span>
+    );
+  }
+  return (
+    <span className="trend-badge trend-flat" title={title}>
+      {win || "·"}
+    </span>
+  );
 }
 
 function ResearchLinks({ site, compact = false }) {
@@ -1193,8 +1428,55 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
           <MetricBar label="外部热度" metric={site.scoreBreakdown?.external} />
           <MetricBar label="新鲜度" metric={site.scoreBreakdown?.freshness} />
           <MetricBar label="扫描动量" metric={site.scoreBreakdown?.momentum} />
+          <MetricBar label="可赢性" metric={site.scoreBreakdown?.winability} />
+          <MetricBar label="成熟度" metric={site.scoreBreakdown?.maturity} invert />
+          <MetricBar label="竞争密度" metric={site.scoreBreakdown?.competition} invert />
           <MetricBar label="风险" metric={site.scoreBreakdown?.risk} invert />
         </div>
+      </section>
+
+      <section>
+        <h3>竞争与成熟度</h3>
+        <div className="terminal-block">
+          <div className="line">
+            <span>competition</span>
+            <strong>
+              {site.competitionScore || 0}
+              {site.competitionLabel ? ` · ${site.competitionLabel}` : ""}
+              {site.competitorCount ? ` · 同类~${site.competitorCount}` : ""}
+            </strong>
+          </div>
+          <div className="line">
+            <span>maturity</span>
+            <strong>
+              {site.maturityScore || 0}
+              {site.maturityLabel ? ` · ${site.maturityLabel}` : ""}
+              {site.blogLinks ? ` · blog ${site.blogLinks}` : ""}
+              {site.toolLinks ? ` · tools ${site.toolLinks}` : ""}
+            </strong>
+          </div>
+          <div className="line">
+            <span>winability</span>
+            <strong>{site.winabilityScore || 0}</strong>
+          </div>
+          <div className="line">
+            <span>verdict</span>
+            <strong>
+              {(site.competitionScore || 0) >= 70 && (site.maturityScore || 0) >= 60
+                ? "需求可借鉴，不建议正面复刻"
+                : (site.winabilityScore || 0) >= 60
+                  ? "窗口尚可，适合差异化切入"
+                  : "需人工再确认竞争与切口"}
+            </strong>
+          </div>
+        </div>
+        {(site.similarTools || []).length ? (
+          <div className="tag-list" style={{ marginTop: 8 }}>
+            {site.similarTools.slice(0, 4).map((tool) => (
+              <span key={tool.url || tool.title}>{tool.title || tool.url}</span>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section>

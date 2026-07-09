@@ -8,6 +8,8 @@ import {
   enrichItemsWithMomentum
 } from "../../server/momentum.js";
 import { compareHostMaps, attachHistorySignals } from "../../server/history-core.js";
+import { enrichItemsWithCompetition } from "../../server/competition.js";
+import { extractMaturityFromHtml } from "../../server/maturity.js";
 
 const COMMON_CRAWL_COLLECTIONS = "https://index.commoncrawl.org/collinfo.json";
 const USER_AGENT =
@@ -254,6 +256,8 @@ function extractMeta(html) {
   const ogTitle = getAttr(source.match(/<meta[^>]+property=["']og:title["'][^>]*>/i)?.[0] || "", "content");
   const ogUrl = getAttr(source.match(/<meta[^>]+property=["']og:url["'][^>]*>/i)?.[0] || "", "content");
   const bodyText = stripTags(source.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] || source);
+  const wordCount = bodyText ? bodyText.split(/\s+/).filter(Boolean).length : 0;
+  const maturityFeatures = extractMaturityFromHtml(source, { wordCount });
 
   return {
     title,
@@ -263,7 +267,8 @@ function extractMeta(html) {
     robots,
     ogTitle: String(ogTitle).replace(/\s+/g, " ").trim(),
     ogUrl,
-    wordCount: bodyText ? bodyText.split(/\s+/).length : 0
+    wordCount,
+    ...maturityFeatures
   };
 }
 
@@ -576,6 +581,45 @@ async function discoverStackOverflow(requestUrl) {
   return { ok: true, source: "Stack Overflow", items: uniqueByHost(items).slice(0, limit) };
 }
 
+async function discoverBluesky(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    q: suffix,
+    limit: String(Math.min(100, Math.max(limit, 25)))
+  });
+  const json = await fetchJson(
+    `https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?${params}`
+  );
+  const items = (json.posts || []).flatMap((post) => {
+    const record = post.record || {};
+    const author = post.author?.handle || "";
+    const text = record.text || "";
+    const embedUris = [];
+    const external = post.embed?.external || post.embed?.record?.embed?.external;
+    if (external?.uri) embedUris.push(external.uri);
+    if (Array.isArray(record.facets)) {
+      for (const facet of record.facets) {
+        for (const feature of facet.features || []) {
+          if (feature.uri) embedUris.push(feature.uri);
+        }
+      }
+    }
+    return extractHostedUrls([text, ...embedUris, author], suffix).map((url) => ({
+      url,
+      source: "Bluesky",
+      title: text.slice(0, 120) || author,
+      lastSeen: record.createdAt || post.indexedAt || "",
+      points: post.likeCount || 0,
+      comments: post.replyCount || 0,
+      externalUrl: post.uri
+        ? `https://bsky.app/profile/${author}/post/${String(post.uri).split("/").pop()}`
+        : ""
+    }));
+  });
+  return { ok: true, source: "Bluesky", items: uniqueByHost(items).slice(0, limit) };
+}
+
 async function discoverGithubRepos(requestUrl, env = {}) {
   const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
   const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
@@ -834,6 +878,7 @@ async function analyzeUrls(request) {
   const results = [];
   const concurrency = 8;
   const enrichMomentum = body?.enrichMomentum !== false;
+  const enrichCompetition = body?.enrichCompetition !== false;
 
   for (let index = 0; index < targets.length; index += concurrency) {
     const batch = targets.slice(index, index + concurrency);
@@ -844,6 +889,12 @@ async function analyzeUrls(request) {
   let withMomentum = await enrichItemsWithMomentum(results, {
     enabled: enrichMomentum,
     concurrency: 3
+  });
+  withMomentum = withMomentum.map(rescoreItem);
+
+  withMomentum = await enrichItemsWithCompetition(withMomentum, {
+    enabled: enrichCompetition,
+    concurrency: 2
   });
   withMomentum = withMomentum.map(rescoreItem);
 
@@ -912,6 +963,7 @@ async function discoverAll(request, env = {}) {
       discoverProductHunt(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     stackoverflow: () =>
       discoverStackOverflow(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    bluesky: () => discoverBluesky(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     "internet-archive": () =>
       discoverInternetArchive(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     certificates: () =>
@@ -1005,6 +1057,10 @@ async function route(request, env = {}) {
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/stackoverflow") {
       return jsonResponse(await discoverStackOverflow(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/bluesky") {
+      return jsonResponse(await discoverBluesky(requestUrl));
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/internet-archive") {

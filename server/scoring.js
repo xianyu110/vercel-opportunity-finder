@@ -1,3 +1,10 @@
+import {
+  computeMaturityScore,
+  maturityLabel,
+  computeWinability
+} from "./maturity.js";
+import { heuristicCompetition } from "./competition.js";
+
 const WEAK_WORDS = [
   "untitled",
   "vite",
@@ -318,13 +325,14 @@ export function scoreOpportunity(site) {
   const historyRising = metricValue(site.history?.risingScore);
   const isHistoryNew = Boolean(site.history?.isNew);
 
+  // Demand should not reward long marketing pages as if they were "better opportunities".
   const demandScore = clamp(
     24 +
       (toolMatches.length ? 28 : 0) +
       (demandMatches.length ? 10 : 0) +
-      (commercialMatches.length ? 14 : 0) +
-      (hasText(site.description) ? 8 : 0) +
-      (site.wordCount > 800 ? 8 : 0) +
+      (commercialMatches.length ? 12 : 0) +
+      (hasText(site.description) ? 6 : 0) +
+      (site.wordCount > 400 && site.wordCount < 2500 ? 6 : 0) +
       (includesAny(text, GAME_WORDS) ? 8 : 0) +
       Math.round(externalSignalScore * 0.28) +
       Math.round(freshnessScore * 0.2) +
@@ -340,14 +348,44 @@ export function scoreOpportunity(site) {
       (includesAny(text, WEAK_WORDS) ? 20 : 0)
   );
 
+  const maturityScore = clamp(
+    metricValue(site.maturityScore) ||
+      computeMaturityScore({
+        wordCount: site.wordCount,
+        blogLinks: site.blogLinks,
+        toolLinks: site.toolLinks,
+        docLinks: site.docLinks,
+        maturePathHits: site.maturePathHits,
+        internalLinkCount: site.internalLinkCount,
+        h2Count: site.h2Count,
+        h3Count: site.h3Count,
+        faqHits: site.faqHits,
+        hasComparisonTable: site.hasComparisonTable,
+        hasStructuredData: site.hasStructuredData,
+        hasNewsletterOrForm: site.hasNewsletterOrForm,
+        matureCopyHits: site.matureCopyHits
+      })
+  );
+
+  const competitionScore = clamp(
+    metricValue(site.competitionScore) ||
+      heuristicCompetition(site.keyword || site.title || host, {
+        title: site.title,
+        description: site.description
+      }).competitionScore
+  );
+
+  // Late-mover friendliness: simple shell + SEO gap + not own-domain locked.
   const replicabilityScore = clamp(
     28 +
-      (toolMatches.length ? 28 : 0) +
-      (!hasOwnDomain ? 18 : 0) +
-      (hasSeoBasics ? 8 : 0) +
-      (site.wordCount < 2500 ? 10 : 0) -
+      (toolMatches.length ? 22 : 0) +
+      (!hasOwnDomain ? 16 : 0) +
+      (hasSeoBasics ? 6 : 0) +
+      (site.wordCount > 0 && site.wordCount < 1800 ? 14 : 0) +
+      Math.round((100 - maturityScore) * 0.18) -
       (brandMatches.length ? 30 : 0) -
-      (loginMatches.length ? 18 : 0)
+      (loginMatches.length ? 18 : 0) -
+      (maturityScore >= 70 ? 18 : 0)
   );
 
   const commercialScore = clamp(
@@ -365,18 +403,32 @@ export function scoreOpportunity(site) {
       loginMatches.length * 18 +
       (hasOfficialProduct ? 45 : 0) +
       (includesAny(text, ["clone", "blocked"]) ? 18 : 0) +
-      (site.robots?.toLowerCase().includes("noindex") ? 16 : 0)
+      (site.robots?.toLowerCase().includes("noindex") ? 16 : 0) +
+      // Red ocean + mature product is a business risk, not just a copy risk.
+      (maturityScore >= 75 && competitionScore >= 65 ? 18 : 0)
   );
 
+  const winabilityScore = computeWinability({
+    seoGap: seoWeaknessScore,
+    maturity: maturityScore,
+    competition: competitionScore,
+    demand: demandScore,
+    risk: riskScore
+  });
+
+  // Opportunity score: demand still matters, but winability/competition/maturity decide actionability.
   let score = Math.round(
-    demandScore * 0.26 +
-      seoWeaknessScore * 0.16 +
-      replicabilityScore * 0.2 +
-      commercialScore * 0.12 +
-      externalSignalScore * 0.1 +
-      freshnessScore * 0.07 +
-      scanMomentumScore * 0.09 +
-      (100 - riskScore) * 0.1
+    demandScore * 0.2 +
+      seoWeaknessScore * 0.12 +
+      replicabilityScore * 0.14 +
+      commercialScore * 0.08 +
+      externalSignalScore * 0.07 +
+      freshnessScore * 0.05 +
+      scanMomentumScore * 0.07 +
+      winabilityScore * 0.18 +
+      (100 - competitionScore) * 0.09 +
+      (100 - maturityScore) * 0.08 +
+      (100 - riskScore) * 0.07
   );
 
   const sourceLabels = Array.isArray(site.sources) && site.sources.length
@@ -515,6 +567,50 @@ export function scoreOpportunity(site) {
     categoryTags.push("已有正式产品");
   }
 
+  if (maturityScore >= 75) {
+    score -= 16;
+    weaknesses.push("页面成熟度高（博客/多工具/长内容），不宜正面复刻");
+    categoryTags.push("已成型产品");
+    signals.push(`成熟度 ${maturityScore}（${maturityLabel(maturityScore)}）`);
+  } else if (maturityScore >= 55) {
+    score -= 8;
+    categoryTags.push("较成熟");
+    signals.push(`成熟度 ${maturityScore}（${maturityLabel(maturityScore)}）`);
+  } else if (maturityScore > 0) {
+    signals.push(`成熟度 ${maturityScore}（${maturityLabel(maturityScore)}）`);
+    if (maturityScore < 35) categoryTags.push("早期壳站");
+  }
+
+  if (competitionScore >= 75) {
+    score -= 18;
+    weaknesses.push("关键词竞争偏红海，后发难突围");
+    categoryTags.push("红海词");
+    signals.push(
+      `竞争 ${competitionScore}${site.competitionLabel ? `/${site.competitionLabel}` : ""}` +
+        (site.competitorCount ? ` · 同类约 ${site.competitorCount}` : "")
+    );
+  } else if (competitionScore >= 50) {
+    score -= 8;
+    categoryTags.push("竞争拥挤");
+    signals.push(
+      `竞争 ${competitionScore}${site.competitionLabel ? `/${site.competitionLabel}` : ""}`
+    );
+  } else if (competitionScore > 0) {
+    signals.push(
+      `竞争 ${competitionScore}${site.competitionLabel ? `/${site.competitionLabel}` : "偏蓝海"}`
+    );
+    if (competitionScore < 35) categoryTags.push("竞争较弱");
+  }
+
+  if (winabilityScore >= 65) {
+    score += 6;
+    signals.push(`可赢性 ${winabilityScore}`);
+    categoryTags.push("可切入");
+  } else if (winabilityScore < 40) {
+    score -= 8;
+    weaknesses.push("可赢性偏低（成熟/红海/缺口不足）");
+  }
+
   if (!hasOwnDomain) {
     weaknesses.push("未绑定自有域名");
   } else {
@@ -528,25 +624,64 @@ export function scoreOpportunity(site) {
   }
 
   const normalizedScore = clamp(score);
-  const decision =
-    hasOfficialProduct || riskScore >= 45 || normalizedScore < 45
-      ? "放弃"
-      : normalizedScore >= 72 && riskScore < 35 && demandScore >= 55
-        ? "值得"
-        : "观察";
 
-  const worthReason =
-    seoWeaknessScore >= 20
-      ? "需求信号和 SEO 缺口同时存在，适合做更完整的自有域名版本。"
-      : "需求信号和可复制性较强，适合继续验证搜索量和差异化空间。";
-  const fitReason =
-    hasOfficialProduct
-      ? "该 Vercel 子域已指向同品牌正式产品或自有域名，不适合作为复刻机会。"
-      : decision === "值得"
-      ? worthReason
-      : decision === "观察"
-        ? "存在可验证线索，但需要先确认搜索量、合规风险或页面质量。"
-        : "风险、可复制性或需求信号不足，不建议优先投入。";
+  // Decision gates: demand alone is not enough — need room to win.
+  const redOceanMature = competitionScore >= 70 && maturityScore >= 60;
+  const hardPass =
+    hasOfficialProduct ||
+    riskScore >= 50 ||
+    adultMatches.length > 0 ||
+    (redOceanMature && winabilityScore < 45);
+
+  let decision;
+  if (hardPass || normalizedScore < 42) {
+    decision = "放弃";
+  } else if (
+    normalizedScore >= 70 &&
+    riskScore < 35 &&
+    demandScore >= 50 &&
+    winabilityScore >= 58 &&
+    competitionScore < 70 &&
+    maturityScore < 70
+  ) {
+    decision = "值得";
+  } else {
+    decision = "观察";
+  }
+
+  // Soft floors for false "值得"
+  if (decision === "值得" && (maturityScore >= 72 || competitionScore >= 78)) {
+    decision = "观察";
+  }
+  // Empty/default shells are research leads, not ready opportunities.
+  if (
+    decision === "值得" &&
+    (includesAny(text, WEAK_WORDS) || (!hasText(site.title) && !hasText(site.description)))
+  ) {
+    decision = "观察";
+  }
+
+  let fitReason;
+  if (hasOfficialProduct) {
+    fitReason = "该 Vercel 子域已指向同品牌正式产品或自有域名，不适合作为复刻机会。";
+  } else if (redOceanMature) {
+    fitReason =
+      "需求可能真实，但竞品密度高且页面已成型（博客/多工具/长内容）。适合借鉴需求做垂直切口，不建议正面复刻。";
+  } else if (decision === "值得") {
+    fitReason =
+      winabilityScore >= 65 && seoWeaknessScore >= 15
+        ? "需求成立，且竞品/成熟度尚未封死窗口，SEO 与产品都有改进空间。"
+        : "需求与可赢性尚可，适合做差异化版本并继续验证搜索量。";
+  } else if (decision === "观察") {
+    fitReason =
+      competitionScore >= 60
+        ? "有需求线索，但竞争偏拥挤，需先确认差异化切口（人群/语言/形态）再投入。"
+        : maturityScore >= 55
+          ? "站点已有一定完成度，需确认是否还能明显做得更好，避免同质化。"
+          : "存在可验证线索，但需要先确认搜索量、合规风险或页面质量。";
+  } else {
+    fitReason = "风险过高、红海已成型，或需求/可赢性不足，不建议优先投入。";
+  }
 
   return {
     score: normalizedScore,
@@ -562,6 +697,13 @@ export function scoreOpportunity(site) {
     scanCount7d: metricValue(site.scanCount7d),
     scanCountPrev7d: metricValue(site.scanCountPrev7d),
     scanMomentum: scanMomentumScore,
+    maturityScore,
+    maturityLabel: maturityLabel(maturityScore),
+    competitionScore,
+    competitionLabel: site.competitionLabel ||
+      (competitionScore >= 75 ? "红海" : competitionScore >= 50 ? "拥挤" : competitionScore >= 30 ? "一般" : "蓝海"),
+    competitorCount: metricValue(site.competitorCount),
+    winabilityScore,
     scoreBreakdown: {
       demand: { score: demandScore, label: scoreLabel(demandScore) },
       seoGap: { score: seoWeaknessScore, label: scoreLabel(seoWeaknessScore) },
@@ -570,6 +712,19 @@ export function scoreOpportunity(site) {
       external: { score: externalSignalScore, label: scoreLabel(externalSignalScore) },
       freshness: { score: freshnessScore, label: scoreLabel(freshnessScore) },
       momentum: { score: scanMomentumScore, label: scoreLabel(scanMomentumScore) },
+      maturity: { score: maturityScore, label: maturityLabel(maturityScore) },
+      competition: {
+        score: competitionScore,
+        label:
+          competitionScore >= 75
+            ? "红海"
+            : competitionScore >= 50
+              ? "拥挤"
+              : competitionScore >= 30
+                ? "一般"
+                : "蓝海"
+      },
+      winability: { score: winabilityScore, label: scoreLabel(winabilityScore) },
       risk: { score: riskScore, label: riskScore >= 60 ? "high" : riskScore >= 30 ? "medium" : "low" }
     }
   };

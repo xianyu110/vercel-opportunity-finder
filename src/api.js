@@ -43,6 +43,7 @@ export async function analyzeUrls({
   excludedHosts = [],
   suffix = "vercel.app",
   enrichMomentum = true,
+  enrichCompetition = true,
   saveHistory = true
 }) {
   return readJson(
@@ -57,6 +58,7 @@ export async function analyzeUrls({
         excludedHosts,
         suffix,
         enrichMomentum,
+        enrichCompetition,
         saveHistory
       })
     })

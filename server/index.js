@@ -19,6 +19,8 @@ import {
   aggregateUrlscanMomentum,
   enrichItemsWithMomentum
 } from "./momentum.js";
+import { enrichItemsWithCompetition } from "./competition.js";
+import { extractMaturityFromHtml } from "./maturity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -242,6 +244,8 @@ function extractMeta(html) {
   const ogTitle = $('meta[property="og:title"]').attr("content") || "";
   const ogUrl = $('meta[property="og:url"]').attr("content") || "";
   const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+  const wordCount = bodyText ? bodyText.split(/\s+/).filter(Boolean).length : 0;
+  const maturityFeatures = extractMaturityFromHtml(html, { wordCount });
 
   return {
     title,
@@ -251,7 +255,8 @@ function extractMeta(html) {
     robots,
     ogTitle: String(ogTitle).replace(/\s+/g, " ").trim(),
     ogUrl,
-    wordCount: bodyText ? bodyText.split(/\s+/).length : 0
+    wordCount,
+    ...maturityFeatures
   };
 }
 
@@ -276,7 +281,15 @@ function metadataFromInput(input) {
     scanCountPrev7d: Number(item.scanCountPrev7d || 0),
     scanCount30d: Number(item.scanCount30d || 0),
     scanMomentum: Number(item.scanMomentum || 0),
-    history: item.history || null
+    history: item.history || null,
+    competitionScore: Number(item.competitionScore || 0),
+    competitorCount: Number(item.competitorCount || 0),
+    competitionLabel: item.competitionLabel || "",
+    maturityScore: Number(item.maturityScore || 0),
+    blogLinks: Number(item.blogLinks || 0),
+    toolLinks: Number(item.toolLinks || 0),
+    faqHits: Number(item.faqHits || 0),
+    h2Count: Number(item.h2Count || 0)
   };
 }
 
@@ -558,6 +571,48 @@ const DISCOVER_HANDLERS = {
       items: uniqueByHost(items).slice(0, limit)
     };
   },
+  bluesky: async ({ suffix, limit }) => {
+    const params = new URLSearchParams({
+      q: suffix,
+      limit: String(Math.min(100, Math.max(limit, 25)))
+    });
+    const json = await fetchJson(
+      `https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?${params}`,
+      { timeoutMs: 15000 }
+    );
+    const items = (json.posts || []).flatMap((post) => {
+      const record = post.record || {};
+      const author = post.author?.handle || "";
+      const text = record.text || "";
+      const embedUris = [];
+      const external = post.embed?.external || post.embed?.record?.embed?.external;
+      if (external?.uri) embedUris.push(external.uri);
+      if (Array.isArray(record.facets)) {
+        for (const facet of record.facets) {
+          for (const feature of facet.features || []) {
+            if (feature.uri) embedUris.push(feature.uri);
+          }
+        }
+      }
+
+      return extractHostedUrls([text, ...embedUris, author], suffix).map((url) => ({
+        url,
+        source: "Bluesky",
+        title: text.slice(0, 120) || author,
+        lastSeen: record.createdAt || post.indexedAt || "",
+        points: post.likeCount || 0,
+        comments: post.replyCount || 0,
+        externalUrl: post.uri
+          ? `https://bsky.app/profile/${author}/post/${String(post.uri).split("/").pop()}`
+          : ""
+      }));
+    });
+    return {
+      ok: true,
+      source: "Bluesky",
+      items: uniqueByHost(items).slice(0, limit)
+    };
+  },
   "github-repos": async ({ suffix, limit }) => {
     const params = new URLSearchParams({
       q: suffix,
@@ -754,6 +809,7 @@ const DISCOVER_GET_ROUTES = [
   ["reddit", "reddit"],
   ["producthunt", "producthunt"],
   ["stackoverflow", "stackoverflow"],
+  ["bluesky", "bluesky"],
   ["internet-archive", "internet-archive"],
   ["certificates", "certificates"]
 ];
@@ -823,6 +879,7 @@ app.post("/api/analyze", async (req, res) => {
     const source = req.body?.source || "Manual";
     const mode = req.body?.mode === "random" ? "random" : "smart";
     const enrichMomentum = req.body?.enrichMomentum !== false;
+    const enrichCompetition = req.body?.enrichCompetition !== false;
     const saveHistory = req.body?.saveHistory !== false;
     const suffix = normalizeSuffix(req.body?.suffix || "vercel.app");
     const excludedHosts = new Set(
@@ -857,6 +914,13 @@ app.post("/api/analyze", async (req, res) => {
     });
     withMomentum = withMomentum.map(rescoreItem);
 
+    // SERP / keyword competition density (demote red oceans)
+    withMomentum = await enrichItemsWithCompetition(withMomentum, {
+      enabled: enrichCompetition,
+      concurrency: 3
+    });
+    withMomentum = withMomentum.map(rescoreItem);
+
     // Day-over-day vs previous snapshot
     let historyMeta = null;
     let comparison = null;
@@ -881,7 +945,8 @@ app.post("/api/analyze", async (req, res) => {
           meta: {
             mode,
             poolSize: normalized.length,
-            enrichMomentum
+            enrichMomentum,
+            enrichCompetition
           }
         });
       } catch {
