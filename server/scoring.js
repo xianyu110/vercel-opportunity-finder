@@ -626,12 +626,14 @@ export function scoreOpportunity(site) {
   const normalizedScore = clamp(score);
 
   // Decision gates: demand alone is not enough — need room to win.
-  const redOceanMature = competitionScore >= 70 && maturityScore >= 60;
+  const redOceanMature = competitionScore >= 55 && maturityScore >= 60;
+  const fullyMatureProduct = maturityScore >= 75;
   const hardPass =
     hasOfficialProduct ||
     riskScore >= 50 ||
     adultMatches.length > 0 ||
-    (redOceanMature && winabilityScore < 45);
+    fullyMatureProduct ||
+    (redOceanMature && winabilityScore < 50);
 
   let decision;
   if (hardPass || normalizedScore < 42) {
@@ -641,8 +643,8 @@ export function scoreOpportunity(site) {
     riskScore < 35 &&
     demandScore >= 50 &&
     winabilityScore >= 58 &&
-    competitionScore < 70 &&
-    maturityScore < 70
+    competitionScore < 65 &&
+    maturityScore < 55
   ) {
     decision = "值得";
   } else {
@@ -650,7 +652,7 @@ export function scoreOpportunity(site) {
   }
 
   // Soft floors for false "值得"
-  if (decision === "值得" && (maturityScore >= 72 || competitionScore >= 78)) {
+  if (decision === "值得" && (maturityScore >= 55 || competitionScore >= 70)) {
     decision = "观察";
   }
   // Empty/default shells are research leads, not ready opportunities.
@@ -664,9 +666,9 @@ export function scoreOpportunity(site) {
   let fitReason;
   if (hasOfficialProduct) {
     fitReason = "该 Vercel 子域已指向同品牌正式产品或自有域名，不适合作为复刻机会。";
-  } else if (redOceanMature) {
+  } else if (fullyMatureProduct || redOceanMature) {
     fitReason =
-      "需求可能真实，但竞品密度高且页面已成型（博客/多工具/长内容）。适合借鉴需求做垂直切口，不建议正面复刻。";
+      "需求可能真实，但页面已成型（博客/多工具/长内容）或竞争偏拥挤。适合借鉴需求做垂直切口，不建议正面复刻。";
   } else if (decision === "值得") {
     fitReason =
       winabilityScore >= 65 && seoWeaknessScore >= 15
@@ -674,13 +676,16 @@ export function scoreOpportunity(site) {
         : "需求与可赢性尚可，适合做差异化版本并继续验证搜索量。";
   } else if (decision === "观察") {
     fitReason =
-      competitionScore >= 60
+      competitionScore >= 55
         ? "有需求线索，但竞争偏拥挤，需先确认差异化切口（人群/语言/形态）再投入。"
         : maturityScore >= 55
           ? "站点已有一定完成度，需确认是否还能明显做得更好，避免同质化。"
           : "存在可验证线索，但需要先确认搜索量、合规风险或页面质量。";
   } else {
-    fitReason = "风险过高、红海已成型，或需求/可赢性不足，不建议优先投入。";
+    fitReason =
+      fullyMatureProduct
+        ? "对方已是成型产品（内容/工具矩阵完整），不建议作为复刻目标；可只借鉴需求词。"
+        : "风险过高、红海已成型，或需求/可赢性不足，不建议优先投入。";
   }
 
   return {

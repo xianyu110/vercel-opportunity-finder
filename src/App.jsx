@@ -1419,7 +1419,7 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
       </section>
 
       <section>
-        <h3>五维评分</h3>
+        <h3>多维评分</h3>
         <div className="metric-stack">
           <MetricBar label="需求信号" metric={site.scoreBreakdown?.demand} />
           <MetricBar label="SEO 缺口" metric={site.scoreBreakdown?.seoGap} />
