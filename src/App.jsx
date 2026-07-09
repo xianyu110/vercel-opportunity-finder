@@ -1250,32 +1250,52 @@ function WinBadge({ row }) {
   const win = row?.winabilityScore || 0;
   const comp = row?.competitionScore || 0;
   const mat = row?.maturityScore || 0;
+  const dead =
+    row?.httpStatus === 402 ||
+    row?.httpStatus === 404 ||
+    row?.ok === false ||
+    (row?.categoryTags || []).some((tag) => /挂|暂停/.test(tag)) ||
+    /paused|not found/i.test(`${row?.title || ""} ${row?.h1 || ""}`);
   const title = `可赢性 ${win} · 竞争 ${comp}${row?.competitionLabel ? `/${row.competitionLabel}` : ""} · 成熟度 ${mat}${row?.maturityLabel ? `/${row.maturityLabel}` : ""}`;
 
-  if (comp >= 75 || (comp >= 65 && mat >= 60)) {
+  if (dead) {
+    return (
+      <span className="trend-badge trend-down" title={title}>
+        挂掉
+      </span>
+    );
+  }
+  if (mat >= 70 || (row?.categoryTags || []).includes("已成型产品")) {
+    return (
+      <span className="trend-badge trend-down" title={title}>
+        成型
+      </span>
+    );
+  }
+  if (comp >= 65 || (row?.categoryTags || []).includes("红海词")) {
     return (
       <span className="trend-badge trend-down" title={title}>
         红海
       </span>
     );
   }
-  if (win >= 60 && mat < 70 && comp < 70) {
+  if (win >= 58 && mat < 55 && comp < 65 && row?.decision === "值得") {
     return (
       <span className="trend-badge trend-up" title={title}>
         可切
       </span>
     );
   }
-  if (mat >= 70) {
+  if ((row?.categoryTags || []).includes("已绑定域名")) {
     return (
       <span className="trend-badge trend-flat" title={title}>
-        成型
+        转正
       </span>
     );
   }
   return (
     <span className="trend-badge trend-flat" title={title}>
-      {win || "·"}
+      {win > 0 ? win : "—"}
     </span>
   );
 }

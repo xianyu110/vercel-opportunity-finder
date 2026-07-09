@@ -315,6 +315,18 @@ export function scoreOpportunity(site) {
   const loginMatches = matchedWords(text, LOGIN_WORDS);
   const hasOwnDomain = !host.endsWith(".vercel.app");
   const isReachable = site.httpStatus >= 200 && site.httpStatus < 400;
+  const isDeadOrPaused =
+    !isReachable ||
+    site.httpStatus === 402 ||
+    site.httpStatus === 404 ||
+    site.httpStatus === 410 ||
+    includesAny(text, [
+      "deployment paused",
+      "this deployment is temporarily paused",
+      "404: not found",
+      "project not found",
+      "deployment not found"
+    ]);
   const hasSeoBasics = hasText(site.title) && hasText(site.description) && hasText(site.h1);
   const externalSignalScore = engagementScore(site);
   const freshnessScore = recencyScore(site);
@@ -510,7 +522,16 @@ export function scoreOpportunity(site) {
   if (site.redditScore > 0) signals.push(`reddit score ${site.redditScore}`);
   if (site.stackOverflowAnswers > 0) signals.push(`SO answers ${site.stackOverflowAnswers}`);
 
-  if (isReachable) {
+  if (isDeadOrPaused) {
+    score -= 35;
+    weaknesses.push(
+      site.httpStatus
+        ? `站点不可用 HTTP ${site.httpStatus}`
+        : "站点不可用/已暂停"
+    );
+    categoryTags.push("已挂/暂停");
+    riskFlags.push("部署暂停或不可访问，当前不是可做机会");
+  } else if (isReachable) {
     score += 4;
     signals.push("首页可访问");
   } else if (site.httpStatus) {
@@ -630,6 +651,7 @@ export function scoreOpportunity(site) {
   const fullyMatureProduct = maturityScore >= 75;
   const hardPass =
     hasOfficialProduct ||
+    isDeadOrPaused ||
     riskScore >= 50 ||
     adultMatches.length > 0 ||
     fullyMatureProduct ||
@@ -664,7 +686,10 @@ export function scoreOpportunity(site) {
   }
 
   let fitReason;
-  if (hasOfficialProduct) {
+  if (isDeadOrPaused) {
+    fitReason =
+      "站点当前不可访问或部署已暂停（如 HTTP 402/Paused）。先排除，等恢复后再评估需求与竞争。";
+  } else if (hasOfficialProduct) {
     fitReason = "该 Vercel 子域已指向同品牌正式产品或自有域名，不适合作为复刻机会。";
   } else if (fullyMatureProduct || redOceanMature) {
     fitReason =
