@@ -7,13 +7,25 @@ import {
   mergeCandidatesByHost,
   selectAnalysisBatch
 } from "./candidates.js";
+import {
+  saveSnapshot,
+  listSnapshots,
+  getSnapshot,
+  compareLatest,
+  getRisingHosts,
+  attachHistorySignals
+} from "./history.js";
+import {
+  aggregateUrlscanMomentum,
+  enrichItemsWithMomentum
+} from "./momentum.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 4174);
 const COMMON_CRAWL_COLLECTIONS = "https://index.commoncrawl.org/collinfo.json";
 const USER_AGENT =
-  "VercelOpportunityFinder/0.2 (+local research tool; contact: local)";
+  "VercelOpportunityFinder/0.3 (+local research tool; contact: local)";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
 
 const app = express();
@@ -256,7 +268,24 @@ function metadataFromInput(input) {
     downloadsMonthly: Number(item.downloadsMonthly || 0),
     packageName: item.packageName || "",
     repoName: item.repoName || "",
-    externalUrl: item.externalUrl || ""
+    externalUrl: item.externalUrl || "",
+    redditScore: Number(item.redditScore || 0),
+    redditComments: Number(item.redditComments || 0),
+    stackOverflowAnswers: Number(item.stackOverflowAnswers || 0),
+    scanCount7d: Number(item.scanCount7d || 0),
+    scanCountPrev7d: Number(item.scanCountPrev7d || 0),
+    scanCount30d: Number(item.scanCount30d || 0),
+    scanMomentum: Number(item.scanMomentum || 0),
+    history: item.history || null
+  };
+}
+
+function rescoreItem(item) {
+  const scored = scoreOpportunity(item);
+  return {
+    ...item,
+    ...scored,
+    host: item.host || safeHost(item.url)
   };
 }
 
@@ -393,19 +422,141 @@ const DISCOVER_HANDLERS = {
     };
   },
   urlscan: async ({ suffix, limit }) => {
+    // Pull a wider window so we can approximate 7d vs prev-7d scan density.
     const params = new URLSearchParams({
       q: `page.domain:${suffix} AND page.status:200`,
-      size: String(Math.min(limit, 100))
+      size: String(Math.min(100, Math.max(limit * 2, 40)))
     });
     const json = await fetchJson(`https://urlscan.io/api/v1/search/?${params}`);
-    const items = (json.results || []).map((result) => ({
-      url: normalizeUrl(result.page?.url || result.page?.domain || ""),
+    const aggregated = aggregateUrlscanMomentum(json.results || []);
+    const items = aggregated
+      .filter((item) => item.host.endsWith(`.${suffix}`) || item.host === suffix)
+      .map((item) => ({
+        ...item,
+        url: normalizeUrl(item.url),
+        source: "URLScan"
+      }));
+    return {
+      ok: true,
       source: "URLScan",
-      title: result.page?.title || "",
-      lastSeen: result.task?.time || result.indexedAt || "",
-      httpStatus: result.page?.status || 0
-    }));
-    return { ok: true, source: "URLScan", items: uniqueByHost(items).slice(0, limit) };
+      items: uniqueByHost(items)
+        .sort((a, b) => (b.scanMomentum || 0) - (a.scanMomentum || 0))
+        .slice(0, limit)
+    };
+  },
+  reddit: async ({ suffix, limit }) => {
+    const params = new URLSearchParams({
+      q: suffix,
+      sort: "new",
+      limit: String(Math.min(100, Math.max(limit, 25))),
+      t: "month",
+      type: "link,self"
+    });
+    const json = await fetchJson(`https://www.reddit.com/search.json?${params}`, {
+      timeoutMs: 15000
+    });
+    const posts = json?.data?.children || [];
+    const items = posts.flatMap((entry) => {
+      const post = entry.data || {};
+      return extractHostedUrls(
+        [post.url, post.selftext, post.title, post.permalink],
+        suffix
+      ).map((url) => ({
+        url,
+        source: "Reddit",
+        title: post.title || "",
+        lastSeen: post.created_utc
+          ? new Date(post.created_utc * 1000).toISOString()
+          : "",
+        redditScore: post.score || 0,
+        redditComments: post.num_comments || 0,
+        points: post.score || 0,
+        comments: post.num_comments || 0,
+        externalUrl: post.permalink ? `https://www.reddit.com${post.permalink}` : ""
+      }));
+    });
+    return { ok: true, source: "Reddit", items: uniqueByHost(items).slice(0, limit) };
+  },
+  producthunt: async ({ suffix, limit }) => {
+    // Best-effort: Product Hunt public Algolia index (search-only). May break if keys rotate.
+    const endpoint =
+      "https://0h4smabbsg-dsn.algolia.net/1/indexes/Post_production/query";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-algolia-application-id": "0H4SMABBSG",
+        "x-algolia-api-key": "9670d2d619b9d07859448d7628eea5f3",
+        "user-agent": USER_AGENT
+      },
+      body: JSON.stringify({
+        query: suffix,
+        hitsPerPage: Math.min(50, Math.max(limit, 20))
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`Product Hunt search HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    const items = (json.hits || []).flatMap((hit) =>
+      extractHostedUrls(
+        [
+          hit.name,
+          hit.tagline,
+          hit.description,
+          hit.url,
+          hit.website,
+          hit.product_links?.map((link) => link.url).join(" ")
+        ],
+        suffix
+      ).map((url) => ({
+        url,
+        source: "Product Hunt",
+        title: hit.name || hit.tagline || "",
+        lastSeen: hit.created_at || hit.featured_at || "",
+        points: hit.votes_count || hit.points || 0,
+        comments: hit.comments_count || 0,
+        externalUrl: hit.slug ? `https://www.producthunt.com/posts/${hit.slug}` : ""
+      }))
+    );
+    return {
+      ok: true,
+      source: "Product Hunt",
+      items: uniqueByHost(items).slice(0, limit)
+    };
+  },
+  stackoverflow: async ({ suffix, limit }) => {
+    const params = new URLSearchParams({
+      order: "desc",
+      sort: "activity",
+      q: suffix,
+      site: "stackoverflow",
+      pagesize: String(Math.min(50, Math.max(limit, 20))),
+      filter: "withbody"
+    });
+    const json = await fetchJson(
+      `https://api.stackexchange.com/2.3/search/advanced?${params}`,
+      { timeoutMs: 15000 }
+    );
+    const items = (json.items || []).flatMap((post) =>
+      extractHostedUrls([post.title, post.body, post.link], suffix).map((url) => ({
+        url,
+        source: "Stack Overflow",
+        title: post.title || "",
+        lastSeen: post.last_activity_date
+          ? new Date(post.last_activity_date * 1000).toISOString()
+          : "",
+        stackOverflowAnswers: post.answer_count || 0,
+        points: post.score || 0,
+        comments: post.answer_count || 0,
+        externalUrl: post.link || ""
+      }))
+    );
+    return {
+      ok: true,
+      source: "Stack Overflow",
+      items: uniqueByHost(items).slice(0, limit)
+    };
   },
   "github-repos": async ({ suffix, limit }) => {
     const params = new URLSearchParams({
@@ -600,6 +751,9 @@ const DISCOVER_GET_ROUTES = [
   ["hackernews", "hackernews"],
   ["npm", "npm"],
   ["gitlab", "gitlab"],
+  ["reddit", "reddit"],
+  ["producthunt", "producthunt"],
+  ["stackoverflow", "stackoverflow"],
   ["internet-archive", "internet-archive"],
   ["certificates", "certificates"]
 ];
@@ -668,6 +822,9 @@ app.post("/api/analyze", async (req, res) => {
     const urls = Array.isArray(req.body?.urls) ? req.body.urls : [];
     const source = req.body?.source || "Manual";
     const mode = req.body?.mode === "random" ? "random" : "smart";
+    const enrichMomentum = req.body?.enrichMomentum !== false;
+    const saveHistory = req.body?.saveHistory !== false;
+    const suffix = normalizeSuffix(req.body?.suffix || "vercel.app");
     const excludedHosts = new Set(
       (Array.isArray(req.body?.excludedHosts) ? req.body.excludedHosts : []).map(String)
     );
@@ -693,12 +850,126 @@ app.post("/api/analyze", async (req, res) => {
       results.push(...analyzed);
     }
 
+    // URLScan per-host momentum (7d vs prev 7d) as rising-traffic proxy
+    let withMomentum = await enrichItemsWithMomentum(results, {
+      enabled: enrichMomentum,
+      concurrency: 4
+    });
+    withMomentum = withMomentum.map(rescoreItem);
+
+    // Day-over-day vs previous snapshot
+    let historyMeta = null;
+    let comparison = null;
+    try {
+      const compared = await compareLatest({ suffix, items: withMomentum });
+      comparison = compared.comparison;
+      withMomentum = attachHistorySignals(withMomentum, comparison).map(rescoreItem);
+      historyMeta = {
+        previous: compared.previous,
+        summary: comparison?.summary || null
+      };
+    } catch {
+      // history is optional
+    }
+
+    let snapshot = null;
+    if (saveHistory && withMomentum.length) {
+      try {
+        snapshot = await saveSnapshot({
+          suffix,
+          items: withMomentum,
+          meta: {
+            mode,
+            poolSize: normalized.length,
+            enrichMomentum
+          }
+        });
+      } catch {
+        // ignore persistence failures
+      }
+    }
+
     res.json({
       ok: true,
       mode,
       selected: targets.length,
       poolSize: normalized.length,
-      items: results
+      items: withMomentum,
+      snapshot: snapshot
+        ? { id: snapshot.id, createdAt: snapshot.createdAt, hostCount: snapshot.hostCount }
+        : null,
+      history: historyMeta,
+      rising: (comparison?.rising || []).slice(0, 20)
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const limit = normalizeLimit(req.query.limit, 20, 100);
+    const suffix = req.query.suffix ? normalizeSuffix(req.query.suffix) : undefined;
+    const snapshots = await listSnapshots({ limit, suffix });
+    res.json({ ok: true, snapshots });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/history/rising", async (req, res) => {
+  try {
+    const limit = normalizeLimit(req.query.limit, 30, 100);
+    const suffix = req.query.suffix ? normalizeSuffix(req.query.suffix) : undefined;
+    const payload = await getRisingHosts({ suffix, limit });
+    res.json({ ok: true, ...payload });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/history/compare", async (req, res) => {
+  try {
+    const suffix = req.query.suffix ? normalizeSuffix(req.query.suffix) : undefined;
+    const snapshotId = req.query.snapshotId || undefined;
+    const payload = await compareLatest({ suffix, snapshotId });
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/history/:id", async (req, res) => {
+  try {
+    const snapshot = await getSnapshot(req.params.id);
+    res.json({ ok: true, snapshot });
+  } catch (error) {
+    res.status(404).json({ ok: false, error: error.message || "Snapshot not found" });
+  }
+});
+
+app.post("/api/history/save", async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const suffix = normalizeSuffix(req.body?.suffix || "vercel.app");
+    if (!items.length) {
+      return res.status(400).json({ ok: false, error: "items required" });
+    }
+    const snapshot = await saveSnapshot({
+      suffix,
+      items,
+      meta: req.body?.meta || {}
+    });
+    const compared = await compareLatest({ snapshotId: snapshot.id, suffix });
+    res.json({
+      ok: true,
+      snapshot: {
+        id: snapshot.id,
+        createdAt: snapshot.createdAt,
+        hostCount: snapshot.hostCount
+      },
+      comparison: compared.comparison,
+      previous: compared.previous
     });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });

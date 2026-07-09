@@ -14,53 +14,14 @@ async function readJson(response) {
   return payload;
 }
 
-function withParams({ suffix, limit }) {
-  return new URLSearchParams({ suffix, limit: String(limit) });
-}
-
-export async function discoverCommonCrawl({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/commoncrawl?${params}`)));
-}
-
-export async function discoverUrlscan({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/urlscan?${params}`)));
-}
-
-export async function discoverGithubRepos({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/github-repos?${params}`)));
-}
-
-export async function discoverGithubIssues({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/github-issues?${params}`)));
-}
-
-export async function discoverHackerNews({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/hackernews?${params}`)));
-}
-
-export async function discoverNpm({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/npm?${params}`)));
-}
-
-export async function discoverGitlab({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/gitlab?${params}`)));
-}
-
-export async function discoverInternetArchive({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/internet-archive?${params}`)));
-}
-
-export async function discoverCertificates({ suffix, limit }) {
-  const params = withParams({ suffix, limit });
-  return readJson(await fetch(apiUrl(`/api/discover/certificates?${params}`)));
+function withParams(values) {
+  const params = new URLSearchParams();
+  Object.entries(values || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  });
+  return params;
 }
 
 /** Parallel multi-source discovery (preferred). */
@@ -79,13 +40,54 @@ export async function analyzeUrls({
   limit,
   source,
   mode = "smart",
-  excludedHosts = []
+  excludedHosts = [],
+  suffix = "vercel.app",
+  enrichMomentum = true,
+  saveHistory = true
 }) {
   return readJson(
     await fetch(apiUrl("/api/analyze"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ urls, limit, source, mode, excludedHosts })
+      body: JSON.stringify({
+        urls,
+        limit,
+        source,
+        mode,
+        excludedHosts,
+        suffix,
+        enrichMomentum,
+        saveHistory
+      })
+    })
+  );
+}
+
+export async function listHistory({ suffix, limit = 20 } = {}) {
+  const params = withParams({ suffix, limit });
+  return readJson(await fetch(apiUrl(`/api/history?${params}`)));
+}
+
+export async function getHistoryRising({ suffix, limit = 30 } = {}) {
+  const params = withParams({ suffix, limit });
+  return readJson(await fetch(apiUrl(`/api/history/rising?${params}`)));
+}
+
+export async function compareHistory({ suffix, snapshotId } = {}) {
+  const params = withParams({ suffix, snapshotId });
+  return readJson(await fetch(apiUrl(`/api/history/compare?${params}`)));
+}
+
+export async function getHistorySnapshot(id) {
+  return readJson(await fetch(apiUrl(`/api/history/${encodeURIComponent(id)}`)));
+}
+
+export async function saveHistorySnapshot({ suffix, items, meta }) {
+  return readJson(
+    await fetch(apiUrl("/api/history/save"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ suffix, items, meta })
     })
   );
 }

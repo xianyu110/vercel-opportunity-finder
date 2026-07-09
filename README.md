@@ -25,6 +25,9 @@
 - **智能优先分析**：优先分析有需求词、热度、近期活跃、多源命中的候选（也可切回随机）。
 - **新鲜度维度**：结合 lastSeen 判断近 7/30 日活跃，帮助捕捉上升中的词。
 - **结论筛选**：表格可按 值得 / 观察 / 放弃 过滤。
+- **扫描动量（上升代理）**：用 URLScan 近 7 日 vs 前 7 日扫描次数估计「注意力是否在涨」。
+- **历史机会池**：每次分析写入 `data/snapshots/`，并做日环比（上升 / 新出现 / 回落）。
+- **更多数据源**：Reddit、Product Hunt（公开搜索 best-effort）、Stack Overflow。
 
 ## 技术栈
 
@@ -183,7 +186,21 @@ VITE_BASE_PATH=/vercel-opportunity-finder/ VITE_API_BASE_URL=http://127.0.0.1:87
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/discover/*` | 单源发现（兼容旧调用） |
 | POST | `/api/discover` | 并行多源发现 `body: { suffix, limit, sources[] }` |
-| POST | `/api/analyze` | 深度分析 `body: { urls, limit, mode: "smart"\|"random", excludedHosts[] }` |
+| POST | `/api/analyze` | 深度分析 + 扫描动量 + 自动存历史 |
+| GET | `/api/history` | 快照列表 |
+| GET | `/api/history/rising` | 日环比上升 host |
+| GET | `/api/history/compare` | 对比最近两次扫描 |
+| GET | `/api/history/:id` | 读取快照 |
+| POST | `/api/history/save` | 手动保存一批结果 |
+
+### 历史与上升信号说明
+
+- **不是真实流量**，而是公开代理信号：
+  - URLScan 扫描频次（近 7 日 / 前 7 日）
+  - 机会分、多源命中数的日环比
+- 本地运行会把快照写到 `data/snapshots/`（已 gitignore）。
+- Cloudflare Worker **不持久化**历史；前端会额外写入 `localStorage` 作备份。
+- Product Hunt 使用公开 Algolia 搜索，密钥若轮换会失败（默认关闭该源）。
 
 ## 注意
 

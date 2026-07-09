@@ -3,10 +3,15 @@ import {
   mergeCandidatesByHost,
   selectAnalysisBatch
 } from "../../server/candidates.js";
+import {
+  aggregateUrlscanMomentum,
+  enrichItemsWithMomentum
+} from "../../server/momentum.js";
+import { compareHostMaps, attachHistorySignals } from "../../server/history-core.js";
 
 const COMMON_CRAWL_COLLECTIONS = "https://index.commoncrawl.org/collinfo.json";
 const USER_AGENT =
-  "VercelOpportunityFinder/0.2 (+cloudflare-worker; contact: local)";
+  "VercelOpportunityFinder/0.3 (+cloudflare-worker; contact: local)";
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
@@ -275,7 +280,24 @@ function metadataFromInput(input) {
     downloadsMonthly: Number(item.downloadsMonthly || 0),
     packageName: item.packageName || "",
     repoName: item.repoName || "",
-    externalUrl: item.externalUrl || ""
+    externalUrl: item.externalUrl || "",
+    redditScore: Number(item.redditScore || 0),
+    redditComments: Number(item.redditComments || 0),
+    stackOverflowAnswers: Number(item.stackOverflowAnswers || 0),
+    scanCount7d: Number(item.scanCount7d || 0),
+    scanCountPrev7d: Number(item.scanCountPrev7d || 0),
+    scanCount30d: Number(item.scanCount30d || 0),
+    scanMomentum: Number(item.scanMomentum || 0),
+    history: item.history || null
+  };
+}
+
+function rescoreItem(item) {
+  const scored = scoreOpportunity(item);
+  return {
+    ...item,
+    ...scored,
+    host: item.host || safeHost(item.url)
   };
 }
 
@@ -425,22 +447,133 @@ async function discoverUrlscan(requestUrl) {
   const query = `page.domain:${suffix} AND page.status:200`;
   const params = new URLSearchParams({
     q: query,
-    size: String(limit)
+    size: String(Math.min(100, Math.max(limit * 2, 40)))
   });
   const json = await fetchJson(`https://urlscan.io/api/v1/search/?${params}`);
-  const items = (json.results || []).map((result) => ({
-    url: normalizeUrl(result.page?.url || result.page?.domain || ""),
-    source: "URLScan",
-    title: result.page?.title || "",
-    lastSeen: result.task?.time || result.indexedAt || "",
-    httpStatus: result.page?.status || 0
-  }));
+  const aggregated = aggregateUrlscanMomentum(json.results || []);
+  const items = aggregated
+    .filter((item) => item.host.endsWith(`.${suffix}`) || item.host === suffix)
+    .map((item) => ({
+      ...item,
+      url: normalizeUrl(item.url),
+      source: "URLScan"
+    }));
 
   return {
     ok: true,
     source: "URLScan",
-    items: uniqueByHost(items).slice(0, limit)
+    items: uniqueByHost(items)
+      .sort((a, b) => (b.scanMomentum || 0) - (a.scanMomentum || 0))
+      .slice(0, limit)
   };
+}
+
+async function discoverReddit(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    q: suffix,
+    sort: "new",
+    limit: String(Math.min(100, Math.max(limit, 25))),
+    t: "month",
+    type: "link,self"
+  });
+  const json = await fetchJson(`https://www.reddit.com/search.json?${params}`);
+  const posts = json?.data?.children || [];
+  const items = posts.flatMap((entry) => {
+    const post = entry.data || {};
+    return extractHostedUrls(
+      [post.url, post.selftext, post.title, post.permalink],
+      suffix
+    ).map((url) => ({
+      url,
+      source: "Reddit",
+      title: post.title || "",
+      lastSeen: post.created_utc ? new Date(post.created_utc * 1000).toISOString() : "",
+      redditScore: post.score || 0,
+      redditComments: post.num_comments || 0,
+      points: post.score || 0,
+      comments: post.num_comments || 0,
+      externalUrl: post.permalink ? `https://www.reddit.com${post.permalink}` : ""
+    }));
+  });
+  return { ok: true, source: "Reddit", items: uniqueByHost(items).slice(0, limit) };
+}
+
+async function discoverProductHunt(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const response = await fetch(
+    "https://0h4smabbsg-dsn.algolia.net/1/indexes/Post_production/query",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-algolia-application-id": "0H4SMABBSG",
+        "x-algolia-api-key": "9670d2d619b9d07859448d7628eea5f3",
+        "user-agent": USER_AGENT
+      },
+      body: JSON.stringify({
+        query: suffix,
+        hitsPerPage: Math.min(50, Math.max(limit, 20))
+      })
+    }
+  );
+  if (!response.ok) throw new Error(`Product Hunt search HTTP ${response.status}`);
+  const json = await response.json();
+  const items = (json.hits || []).flatMap((hit) =>
+    extractHostedUrls(
+      [
+        hit.name,
+        hit.tagline,
+        hit.description,
+        hit.url,
+        hit.website,
+        hit.product_links?.map((link) => link.url).join(" ")
+      ],
+      suffix
+    ).map((url) => ({
+      url,
+      source: "Product Hunt",
+      title: hit.name || hit.tagline || "",
+      lastSeen: hit.created_at || hit.featured_at || "",
+      points: hit.votes_count || hit.points || 0,
+      comments: hit.comments_count || 0,
+      externalUrl: hit.slug ? `https://www.producthunt.com/posts/${hit.slug}` : ""
+    }))
+  );
+  return { ok: true, source: "Product Hunt", items: uniqueByHost(items).slice(0, limit) };
+}
+
+async function discoverStackOverflow(requestUrl) {
+  const limit = normalizeLimit(requestUrl.searchParams.get("limit"), 80, 100);
+  const suffix = normalizeSuffix(requestUrl.searchParams.get("suffix"));
+  const params = new URLSearchParams({
+    order: "desc",
+    sort: "activity",
+    q: suffix,
+    site: "stackoverflow",
+    pagesize: String(Math.min(50, Math.max(limit, 20))),
+    filter: "withbody"
+  });
+  const json = await fetchJson(
+    `https://api.stackexchange.com/2.3/search/advanced?${params}`
+  );
+  const items = (json.items || []).flatMap((post) =>
+    extractHostedUrls([post.title, post.body, post.link], suffix).map((url) => ({
+      url,
+      source: "Stack Overflow",
+      title: post.title || "",
+      lastSeen: post.last_activity_date
+        ? new Date(post.last_activity_date * 1000).toISOString()
+        : "",
+      stackOverflowAnswers: post.answer_count || 0,
+      points: post.score || 0,
+      comments: post.answer_count || 0,
+      externalUrl: post.link || ""
+    }))
+  );
+  return { ok: true, source: "Stack Overflow", items: uniqueByHost(items).slice(0, limit) };
 }
 
 async function discoverGithubRepos(requestUrl, env = {}) {
@@ -700,6 +833,7 @@ async function analyzeUrls(request) {
 
   const results = [];
   const concurrency = 8;
+  const enrichMomentum = body?.enrichMomentum !== false;
 
   for (let index = 0; index < targets.length; index += concurrency) {
     const batch = targets.slice(index, index + concurrency);
@@ -707,12 +841,43 @@ async function analyzeUrls(request) {
     results.push(...analyzed);
   }
 
+  let withMomentum = await enrichItemsWithMomentum(results, {
+    enabled: enrichMomentum,
+    concurrency: 3
+  });
+  withMomentum = withMomentum.map(rescoreItem);
+
+  // Worker has no durable FS history; client localStorage still tracks day-over-day.
+  const comparison = compareHostMaps(
+    Object.fromEntries(
+      withMomentum.map((item) => [
+        item.host || safeHost(item.url),
+        {
+          host: item.host || safeHost(item.url),
+          score: item.score || 0,
+          sourceCount: (item.sources || []).length,
+          scanCount7d: item.scanCount7d || 0,
+          sources: item.sources || []
+        }
+      ])
+    ),
+    {}
+  );
+  withMomentum = attachHistorySignals(withMomentum, comparison).map(rescoreItem);
+
   return {
     ok: true,
     mode,
     selected: targets.length,
     poolSize: normalized.length,
-    items: results
+    items: withMomentum,
+    snapshot: null,
+    history: {
+      previous: null,
+      summary: comparison.summary,
+      note: "Worker 无持久历史，请用本地 API 或浏览器 localStorage 日环比"
+    },
+    rising: comparison.rising.slice(0, 20)
   };
 }
 
@@ -742,6 +907,11 @@ async function discoverAll(request, env = {}) {
     hackernews: () => discoverHackerNews(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     npm: () => discoverNpm(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     gitlab: () => discoverGitlab(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    reddit: () => discoverReddit(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    producthunt: () =>
+      discoverProductHunt(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
+    stackoverflow: () =>
+      discoverStackOverflow(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     "internet-archive": () =>
       discoverInternetArchive(new URL(`https://worker.local/?suffix=${suffix}&limit=${limit}`)),
     certificates: () =>
@@ -825,6 +995,18 @@ async function route(request, env = {}) {
       return jsonResponse(await discoverGitlab(requestUrl));
     }
 
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/reddit") {
+      return jsonResponse(await discoverReddit(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/producthunt") {
+      return jsonResponse(await discoverProductHunt(requestUrl));
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/discover/stackoverflow") {
+      return jsonResponse(await discoverStackOverflow(requestUrl));
+    }
+
     if (request.method === "GET" && requestUrl.pathname === "/api/discover/internet-archive") {
       return jsonResponse(await discoverInternetArchive(requestUrl));
     }
@@ -839,6 +1021,33 @@ async function route(request, env = {}) {
 
     if (request.method === "POST" && requestUrl.pathname === "/api/analyze") {
       return jsonResponse(await analyzeUrls(request));
+    }
+
+    // Durable history requires local Express + data/ directory.
+    if (request.method === "GET" && requestUrl.pathname === "/api/history") {
+      return jsonResponse({
+        ok: true,
+        snapshots: [],
+        note: "Worker 不持久化快照；请使用本地 API 或前端 localStorage"
+      });
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/history/rising") {
+      return jsonResponse({
+        ok: true,
+        items: [],
+        comparison: compareHostMaps({}, {}),
+        note: "Worker 无历史日环比，请用本地 API"
+      });
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/history/compare") {
+      return jsonResponse({
+        ok: true,
+        current: null,
+        previous: null,
+        comparison: compareHostMaps({}, {})
+      });
     }
 
     return jsonResponse({ ok: false, error: "Not found" }, 404);

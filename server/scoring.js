@@ -183,7 +183,17 @@ function domainBrand(hostname) {
   return normalizedBrand(parts.length >= 2 ? parts[parts.length - 2] : parts[0]);
 }
 
-function engagementScore({ stars, forks, openIssues, points, comments, downloadsWeekly }) {
+function engagementScore({
+  stars,
+  forks,
+  openIssues,
+  points,
+  comments,
+  downloadsWeekly,
+  redditScore,
+  redditComments,
+  stackOverflowAnswers
+}) {
   return Math.round(
     clamp(
       Math.min(24, Math.log10(metricValue(stars) + 1) * 12) +
@@ -191,8 +201,25 @@ function engagementScore({ stars, forks, openIssues, points, comments, downloads
         Math.min(8, Math.log10(metricValue(openIssues) + 1) * 5) +
         Math.min(24, Math.log10(metricValue(points) + 1) * 12) +
         Math.min(10, Math.log10(metricValue(comments) + 1) * 7) +
-        Math.min(28, Math.log10(metricValue(downloadsWeekly) + 1) * 9)
+        Math.min(28, Math.log10(metricValue(downloadsWeekly) + 1) * 9) +
+        Math.min(14, Math.log10(metricValue(redditScore) + 1) * 7) +
+        Math.min(8, Math.log10(metricValue(redditComments) + 1) * 4) +
+        Math.min(8, Math.log10(metricValue(stackOverflowAnswers) + 1) * 4)
     )
+  );
+}
+
+function momentumScore(site) {
+  const scanMomentum = metricValue(site.scanMomentum);
+  if (scanMomentum > 0) return clamp(scanMomentum);
+
+  const scan7 = metricValue(site.scanCount7d);
+  const scanPrev = metricValue(site.scanCountPrev7d);
+  const delta = scan7 - scanPrev;
+  return clamp(
+    scan7 * 8 +
+      Math.max(0, delta) * 10 +
+      (scanPrev > 0 && scan7 / scanPrev >= 1.5 ? 12 : 0)
   );
 }
 
@@ -284,9 +311,12 @@ export function scoreOpportunity(site) {
   const hasSeoBasics = hasText(site.title) && hasText(site.description) && hasText(site.h1);
   const externalSignalScore = engagementScore(site);
   const freshnessScore = recencyScore(site);
+  const scanMomentumScore = momentumScore(site);
   const sourcesHit = sourceCount(site);
   const officialHost = officialProductHost(site);
   const hasOfficialProduct = Boolean(officialHost);
+  const historyRising = metricValue(site.history?.risingScore);
+  const isHistoryNew = Boolean(site.history?.isNew);
 
   const demandScore = clamp(
     24 +
@@ -296,8 +326,9 @@ export function scoreOpportunity(site) {
       (hasText(site.description) ? 8 : 0) +
       (site.wordCount > 800 ? 8 : 0) +
       (includesAny(text, GAME_WORDS) ? 8 : 0) +
-      Math.round(externalSignalScore * 0.3) +
-      Math.round(freshnessScore * 0.25) +
+      Math.round(externalSignalScore * 0.28) +
+      Math.round(freshnessScore * 0.2) +
+      Math.round(scanMomentumScore * 0.15) +
       Math.min(12, Math.max(0, sourcesHit - 1) * 6)
   );
 
@@ -338,12 +369,13 @@ export function scoreOpportunity(site) {
   );
 
   let score = Math.round(
-    demandScore * 0.28 +
-      seoWeaknessScore * 0.18 +
-      replicabilityScore * 0.22 +
-      commercialScore * 0.14 +
+    demandScore * 0.26 +
+      seoWeaknessScore * 0.16 +
+      replicabilityScore * 0.2 +
+      commercialScore * 0.12 +
       externalSignalScore * 0.1 +
-      freshnessScore * 0.08 +
+      freshnessScore * 0.07 +
+      scanMomentumScore * 0.09 +
       (100 - riskScore) * 0.1
   );
 
@@ -391,10 +423,40 @@ export function scoreOpportunity(site) {
     signals.push("近 30 日活跃信号");
   }
 
+  if (scanMomentumScore >= 40) {
+    score += 6;
+    signals.push(`URLScan 扫描动量 ${scanMomentumScore}`);
+    categoryTags.push("扫描上升");
+  } else if (scanMomentumScore >= 20) {
+    score += 3;
+    signals.push(`URLScan 扫描动量 ${scanMomentumScore}`);
+  }
+
+  if (metricValue(site.scanCount7d) > 0) {
+    signals.push(`近7日扫描 ${site.scanCount7d}`);
+  }
+  if (metricValue(site.scanCountPrev7d) > 0 && metricValue(site.scanCount7d) > metricValue(site.scanCountPrev7d)) {
+    signals.push(
+      `扫描环比 +${metricValue(site.scanCount7d) - metricValue(site.scanCountPrev7d)}`
+    );
+  }
+
+  if (historyRising >= 35) {
+    score += Math.min(8, Math.round(historyRising * 0.08));
+    signals.push(`历史日环比上升 ${historyRising}`);
+    categoryTags.push("上升中");
+  }
+  if (isHistoryNew && site.history?.label === "新出现") {
+    score += 3;
+    categoryTags.push("新出现");
+  }
+
   if (site.stars > 0) signals.push(`stars ${site.stars}`);
   if (site.points > 0) signals.push(`HN points ${site.points}`);
   if (site.downloadsWeekly > 0) signals.push(`npm weekly downloads ${site.downloadsWeekly}`);
   if (site.comments > 0) signals.push(`讨论评论 ${site.comments}`);
+  if (site.redditScore > 0) signals.push(`reddit score ${site.redditScore}`);
+  if (site.stackOverflowAnswers > 0) signals.push(`SO answers ${site.stackOverflowAnswers}`);
 
   if (isReachable) {
     score += 4;
@@ -497,6 +559,9 @@ export function scoreOpportunity(site) {
     fitReason,
     sources: sourceLabels,
     sourceCount: sourcesHit,
+    scanCount7d: metricValue(site.scanCount7d),
+    scanCountPrev7d: metricValue(site.scanCountPrev7d),
+    scanMomentum: scanMomentumScore,
     scoreBreakdown: {
       demand: { score: demandScore, label: scoreLabel(demandScore) },
       seoGap: { score: seoWeaknessScore, label: scoreLabel(seoWeaknessScore) },
@@ -504,6 +569,7 @@ export function scoreOpportunity(site) {
       commercial: { score: commercialScore, label: scoreLabel(commercialScore) },
       external: { score: externalSignalScore, label: scoreLabel(externalSignalScore) },
       freshness: { score: freshnessScore, label: scoreLabel(freshnessScore) },
+      momentum: { score: scanMomentumScore, label: scoreLabel(scanMomentumScore) },
       risk: { score: riskScore, label: riskScore >= 60 ? "high" : riskScore >= 30 ? "medium" : "low" }
     }
   };

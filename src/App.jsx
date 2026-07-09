@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   ArrowDownUp,
@@ -6,10 +6,10 @@ import {
   Bookmark,
   ChevronRight,
   Download,
-  Eye,
   Filter,
   Github,
   Globe2,
+  History,
   Loader2,
   MessageCircle,
   Play,
@@ -19,21 +19,27 @@ import {
   Sparkles,
   Star,
   Terminal,
+  TrendingUp,
   Zap
 } from "lucide-react";
-import { analyzeUrls, discoverAll } from "./api";
+import { analyzeUrls, discoverAll, listHistory, getHistoryRising } from "./api";
 
 const SOURCES = [
-  { key: "commoncrawl", apiKey: "commoncrawl", label: "Common Crawl", hint: "公开网页索引" },
-  { key: "urlscan", apiKey: "urlscan", label: "URLScan", hint: "近期扫描记录" },
-  { key: "githubRepos", apiKey: "github-repos", label: "GitHub Repos", hint: "仓库描述/主页" },
-  { key: "githubIssues", apiKey: "github-issues", label: "GitHub Issues", hint: "Issue 讨论" },
-  { key: "hackernews", apiKey: "hackernews", label: "Hacker News", hint: "HN 提交" },
-  { key: "npm", apiKey: "npm", label: "npm", hint: "包描述/主页" },
-  { key: "gitlab", apiKey: "gitlab", label: "GitLab", hint: "公开项目" },
-  { key: "internetArchive", apiKey: "internet-archive", label: "Internet Archive", hint: "历史网页快照" },
-  { key: "certificates", apiKey: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧" }
+  { key: "commoncrawl", apiKey: "commoncrawl", label: "Common Crawl", hint: "公开网页索引", defaultOn: true },
+  { key: "urlscan", apiKey: "urlscan", label: "URLScan", hint: "扫描动量/上升代理", defaultOn: true },
+  { key: "githubRepos", apiKey: "github-repos", label: "GitHub Repos", hint: "仓库描述/主页", defaultOn: true },
+  { key: "githubIssues", apiKey: "github-issues", label: "GitHub Issues", hint: "Issue 讨论", defaultOn: true },
+  { key: "hackernews", apiKey: "hackernews", label: "Hacker News", hint: "HN 提交", defaultOn: true },
+  { key: "npm", apiKey: "npm", label: "npm", hint: "包描述/主页", defaultOn: true },
+  { key: "gitlab", apiKey: "gitlab", label: "GitLab", hint: "公开项目", defaultOn: true },
+  { key: "reddit", apiKey: "reddit", label: "Reddit", hint: "公开讨论链接", defaultOn: true },
+  { key: "producthunt", apiKey: "producthunt", label: "Product Hunt", hint: "PH 公开搜索", defaultOn: false },
+  { key: "stackoverflow", apiKey: "stackoverflow", label: "Stack Overflow", hint: "问答提及", defaultOn: false },
+  { key: "internetArchive", apiKey: "internet-archive", label: "Internet Archive", hint: "历史网页快照", defaultOn: false },
+  { key: "certificates", apiKey: "certificates", label: "crt.sh", hint: "证书日志，量大偏旧", defaultOn: false }
 ];
+
+const LOCAL_HISTORY_KEY = "vercel-opportunity-finder.local-history.v1";
 
 const DEFAULT_MANUAL = [
   "toon-tone.vercel.app",
@@ -94,6 +100,48 @@ function readWatchlist() {
 
 function writeWatchlist(next) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+}
+
+function readLocalHistory() {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(LOCAL_HISTORY_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalHistory(entries) {
+  const trimmed = (entries || []).slice(0, 30);
+  window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(trimmed));
+}
+
+function pushLocalHistorySnapshot({ suffix, items, meta }) {
+  const hosts = {};
+  for (const item of items || []) {
+    if (!item?.host) continue;
+    hosts[item.host] = {
+      host: item.host,
+      score: item.score || 0,
+      decision: item.decision || "观察",
+      keyword: item.keyword || "",
+      scanCount7d: item.scanCount7d || 0,
+      scanMomentum: item.scanMomentum || 0,
+      sources: item.sources || []
+    };
+  }
+  const entry = {
+    id: new Date().toISOString().replace(/[:.]/g, "-"),
+    createdAt: new Date().toISOString(),
+    suffix,
+    hostCount: Object.keys(hosts).length,
+    hosts,
+    meta: meta || {}
+  };
+  const next = [entry, ...readLocalHistory().filter((row) => row.id !== entry.id)];
+  writeLocalHistory(next);
+  return entry;
 }
 
 function defaultWatchEntry(row) {
@@ -261,17 +309,9 @@ function exportMarkdown(rows) {
 export default function App() {
   const [suffix, setSuffix] = useState("vercel.app");
   const [limit, setLimit] = useState(40);
-  const [selectedSources, setSelectedSources] = useState({
-    commoncrawl: true,
-    urlscan: true,
-    githubRepos: true,
-    githubIssues: true,
-    hackernews: true,
-    npm: true,
-    gitlab: true,
-    internetArchive: false,
-    certificates: false
-  });
+  const [selectedSources, setSelectedSources] = useState(() =>
+    Object.fromEntries(SOURCES.map((source) => [source.key, Boolean(source.defaultOn)]))
+  );
   const [manualUrls, setManualUrls] = useState(DEFAULT_MANUAL);
   const [candidatePool, setCandidatePool] = useState([]);
   const [rows, setRows] = useState([]);
@@ -281,8 +321,14 @@ export default function App() {
   const [decisionFilter, setDecisionFilter] = useState("all");
   const [analyzeLimit, setAnalyzeLimit] = useState(30);
   const [analyzeMode, setAnalyzeMode] = useState("smart");
+  const [enrichMomentum, setEnrichMomentum] = useState(true);
+  const [saveHistory, setSaveHistory] = useState(true);
   const [showSavedOnly, setShowSavedOnly] = useState(false);
+  const [showRisingOnly, setShowRisingOnly] = useState(false);
   const [watchlist, setWatchlist] = useState(() => readWatchlist());
+  const [historySnapshots, setHistorySnapshots] = useState([]);
+  const [risingSummary, setRisingSummary] = useState(null);
+  const [lastSnapshot, setLastSnapshot] = useState(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("待命：选择数据源后开始扫描。");
   const [error, setError] = useState("");
@@ -304,18 +350,37 @@ export default function App() {
       .filter((row) => row.score >= minScore)
       .filter((row) => decisionFilter === "all" || row.decision === decisionFilter)
       .filter((row) => {
+        if (!showRisingOnly) return true;
+        const label = row.history?.label;
+        return (
+          label === "上升" ||
+          label === "新出现" ||
+          (row.scanMomentum || 0) >= 40 ||
+          (row.categoryTags || []).some((tag) => /上升|新出现|热扫/.test(tag))
+        );
+      })
+      .filter((row) => {
         if (!needle) return true;
         return `${row.url} ${row.title} ${row.keyword} ${row.description} ${formatSources(row)} ${row.watch?.note || ""}`
           .toLowerCase()
           .includes(needle);
       })
-      .sort((a, b) => b.score - a.score);
-  }, [enrichedRows, query, minScore, showSavedOnly, decisionFilter]);
+      .sort((a, b) => {
+        const risingDiff = (b.history?.risingScore || b.scanMomentum || 0) - (a.history?.risingScore || a.scanMomentum || 0);
+        if (showRisingOnly && risingDiff !== 0) return risingDiff;
+        return b.score - a.score;
+      });
+  }, [enrichedRows, query, minScore, showSavedOnly, decisionFilter, showRisingOnly]);
 
   const stats = useMemo(() => {
     const hot = enrichedRows.filter((row) => row.decision === "值得").length;
     const watch = enrichedRows.filter((row) => row.decision === "观察").length;
-    const reachable = enrichedRows.filter((row) => row.ok).length;
+    const rising = enrichedRows.filter(
+      (row) =>
+        row.history?.label === "上升" ||
+        row.history?.isNew ||
+        (row.scanMomentum || 0) >= 40
+    ).length;
     const multi = enrichedRows.filter((row) => (row.sources || []).length >= 2).length;
     const saved = Object.values(watchlist).filter((entry) => entry?.saved).length;
     return {
@@ -323,7 +388,7 @@ export default function App() {
       pool: candidatePool.length,
       hot,
       watch,
-      reachable,
+      rising,
       multi,
       saved
     };
@@ -333,6 +398,11 @@ export default function App() {
     const savedRows = enrichedRows.filter((row) => row.watch?.saved);
     return savedRows.length ? savedRows : filteredRows;
   }, [enrichedRows, filteredRows]);
+
+  useEffect(() => {
+    refreshHistorySidebar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suffix]);
 
   function updateWatch(host, updater) {
     setWatchlist((current) => {
@@ -386,6 +456,32 @@ export default function App() {
     }));
   }
 
+  async function refreshHistorySidebar() {
+    try {
+      const payload = await listHistory({ suffix, limit: 12 });
+      setHistorySnapshots(payload.snapshots || []);
+    } catch {
+      setHistorySnapshots(
+        readLocalHistory()
+          .filter((row) => !suffix || row.suffix === suffix)
+          .map((row) => ({
+            id: row.id,
+            createdAt: row.createdAt,
+            suffix: row.suffix,
+            hostCount: row.hostCount,
+            local: true
+          }))
+      );
+    }
+
+    try {
+      const rising = await getHistoryRising({ suffix, limit: 10 });
+      setRisingSummary(rising);
+    } catch {
+      setRisingSummary(null);
+    }
+  }
+
   async function analyzeBatch(candidates, { excludedHosts = [], reason = "discover" } = {}) {
     const batchSize = Math.min(candidates.length, analyzeLimit);
     const modeLabel =
@@ -397,22 +493,47 @@ export default function App() {
 
     setRows([]);
     setSelectedHost("");
-    setStatus(`候选池 ${candidates.length} 个，${modeLabel}深度分析 ${batchSize} 个...`);
+    setStatus(
+      `候选池 ${candidates.length} 个，${modeLabel}分析 ${batchSize} 个${
+        enrichMomentum ? " + 扫描动量" : ""
+      }...`
+    );
 
     const analyzed = await analyzeUrls({
       urls: candidates,
       limit: batchSize,
       source: "Discovery",
       mode: analyzeMode,
-      excludedHosts
+      excludedHosts,
+      suffix,
+      enrichMomentum,
+      saveHistory
     });
 
     const sorted = (analyzed.items || []).sort((a, b) => b.score - a.score);
     setRows(sorted);
     setSelectedHost(sorted[0]?.host || "");
+
+    if (saveHistory) {
+      pushLocalHistorySnapshot({
+        suffix,
+        items: sorted,
+        meta: { mode: analyzeMode, reason }
+      });
+    }
+
+    if (analyzed.snapshot) {
+      setLastSnapshot(analyzed.snapshot);
+    }
+
+    const risingCount = analyzed.rising?.length || sorted.filter((row) => row.history?.label === "上升" || row.history?.isNew).length;
+    const momentumHits = sorted.filter((row) => (row.scanMomentum || 0) >= 40).length;
     setStatus(
-      `完成：候选池 ${candidates.length} 个，已${modeLabel}分析 ${sorted.length} 个（池内 ${analyzed.poolSize || candidates.length}），按机会分排序。`
+      `完成：分析 ${sorted.length}/${analyzed.poolSize || candidates.length} · 上升 ${risingCount} · 扫描动量高 ${momentumHits}` +
+        (analyzed.snapshot ? ` · 快照 ${analyzed.snapshot.id.slice(0, 19)}` : "")
     );
+
+    await refreshHistorySidebar();
   }
 
   async function runDiscovery() {
@@ -593,8 +714,43 @@ export default function App() {
             评分逻辑
           </div>
           <p>
-            并行发现多源候选，按域名合并后智能优先分析。综合需求、SEO 缺口、可复制性、商业化、外部热度、新鲜度与风险，输出值得 / 观察 / 放弃。
+            并行多源发现 → 合并 host → URLScan 扫描动量 → 历史快照日环比 → 智能抽样分析。输出值得 / 观察 / 放弃。
           </p>
+        </section>
+
+        <section className="side-section">
+          <div className="side-title">
+            <History size={15} />
+            历史机会池
+          </div>
+          <div className="history-list">
+            {historySnapshots.length ? (
+              historySnapshots.slice(0, 8).map((snap) => (
+                <div className="history-item" key={snap.id}>
+                  <strong>{formatDate(snap.createdAt)}</strong>
+                  <small>
+                    {snap.hostCount || 0} hosts
+                    {snap.local ? " · local" : ""}
+                  </small>
+                </div>
+              ))
+            ) : (
+              <p className="history-empty">扫描后自动写入快照，用于日环比。</p>
+            )}
+          </div>
+          {risingSummary?.comparison?.summary ? (
+            <div className="history-rising-box">
+              <TrendingUp size={14} />
+              <span>
+                上升 {risingSummary.comparison.summary.risingCount || 0} · 新
+                {risingSummary.comparison.summary.newCount || 0} · 回落
+                {risingSummary.comparison.summary.declinedCount || 0}
+              </span>
+            </div>
+          ) : null}
+          {lastSnapshot ? (
+            <p className="history-empty">最近快照：{lastSnapshot.id.slice(0, 19)}</p>
+          ) : null}
         </section>
       </aside>
 
@@ -635,6 +791,22 @@ export default function App() {
                 <option value="smart">智能优先</option>
                 <option value="random">随机</option>
               </select>
+            </label>
+            <label className="toggle-inline" title="URLScan 近7日 vs 前7日扫描量">
+              <input
+                type="checkbox"
+                checked={enrichMomentum}
+                onChange={(event) => setEnrichMomentum(event.target.checked)}
+              />
+              <span>扫描动量</span>
+            </label>
+            <label className="toggle-inline" title="写入 data/snapshots 与本地历史">
+              <input
+                type="checkbox"
+                checked={saveHistory}
+                onChange={(event) => setSaveHistory(event.target.checked)}
+              />
+              <span>存历史</span>
             </label>
             <button className="primary-btn" onClick={runDiscovery} disabled={loading}>
               {loading ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
@@ -677,7 +849,7 @@ export default function App() {
           <Kpi icon={<Radar size={18} />} label="候选池" value={stats.pool || stats.total} />
           <Kpi icon={<Globe2 size={18} />} label="已分析" value={stats.total} />
           <Kpi icon={<Zap size={18} />} label="值得做" value={stats.hot} />
-          <Kpi icon={<Eye size={18} />} label="观察中" value={stats.watch} />
+          <Kpi icon={<TrendingUp size={18} />} label="上升中" value={stats.rising} />
           <Kpi icon={<Binary size={18} />} label="多源命中" value={stats.multi} />
           <Kpi icon={<Bookmark size={18} />} label="已收藏" value={stats.saved} />
         </section>
@@ -718,6 +890,13 @@ export default function App() {
                 </select>
               </label>
               <button
+                className={showRisingOnly ? "toggle-chip active" : "toggle-chip"}
+                onClick={() => setShowRisingOnly((value) => !value)}
+              >
+                <TrendingUp size={14} />
+                只看上升
+              </button>
+              <button
                 className={showSavedOnly ? "toggle-chip active" : "toggle-chip"}
                 onClick={() => setShowSavedOnly((value) => !value)}
               >
@@ -737,11 +916,11 @@ export default function App() {
                       </span>
                     </th>
                     <th>Decision</th>
+                    <th>Trend</th>
                     <th>Source</th>
                     <th>Title</th>
                     <th>Keyword</th>
                     <th>Flags</th>
-                    <th>Signals</th>
                     <th>Last Seen</th>
                   </tr>
                 </thead>
@@ -774,6 +953,9 @@ export default function App() {
                       <td>
                         <DecisionBadge decision={row.decision} />
                       </td>
+                      <td>
+                        <TrendBadge row={row} />
+                      </td>
                       <td className="truncate source-cell" title={formatSources(row)}>
                         {formatSources(row)}
                       </td>
@@ -788,9 +970,6 @@ export default function App() {
                           ...(row.categoryTags || []),
                           ...(row.weaknesses || [])
                         ].slice(0, 2).join(" / ") || "-"}
-                      </td>
-                      <td className="truncate">
-                        {(row.signals || []).slice(0, 2).join(" / ") || "-"}
                       </td>
                       <td>{formatDate(row.lastSeen || row.discoveredAt)}</td>
                     </tr>
@@ -834,6 +1013,36 @@ function Kpi({ icon, label, value }) {
 function DecisionBadge({ decision }) {
   const value = decision || "观察";
   return <span className={`decision-badge decision-${value}`}>{value}</span>;
+}
+
+function TrendBadge({ row }) {
+  const label = row?.history?.label;
+  const momentum = row?.scanMomentum || 0;
+  const delta = row?.history?.scoreDelta;
+  const scan7 = row?.scanCount7d;
+
+  if (label === "上升" || label === "新出现") {
+    return (
+      <span className="trend-badge trend-up" title={`risingScore ${row.history?.risingScore || 0}`}>
+        {label === "新出现" ? "NEW" : "↑"}
+        {typeof delta === "number" && delta !== 0 ? ` ${delta > 0 ? "+" : ""}${delta}` : ""}
+      </span>
+    );
+  }
+
+  if (momentum >= 40) {
+    return (
+      <span className="trend-badge trend-up" title={`scanMomentum ${momentum}`}>
+        扫↑{scan7 || ""}
+      </span>
+    );
+  }
+
+  if (label === "回落") {
+    return <span className="trend-badge trend-down">↓</span>;
+  }
+
+  return <span className="trend-badge trend-flat">·</span>;
 }
 
 function ResearchLinks({ site, compact = false }) {
@@ -983,7 +1192,37 @@ function Inspector({ site, onToggleSaved, onUpdateStage, onUpdateNote }) {
           <MetricBar label="商业化" metric={site.scoreBreakdown?.commercial} />
           <MetricBar label="外部热度" metric={site.scoreBreakdown?.external} />
           <MetricBar label="新鲜度" metric={site.scoreBreakdown?.freshness} />
+          <MetricBar label="扫描动量" metric={site.scoreBreakdown?.momentum} />
           <MetricBar label="风险" metric={site.scoreBreakdown?.risk} invert />
+        </div>
+      </section>
+
+      <section>
+        <h3>上升信号</h3>
+        <div className="terminal-block">
+          <div className="line">
+            <span>history</span>
+            <strong>
+              {site.history?.label || "无历史"}
+              {typeof site.history?.scoreDelta === "number"
+                ? ` · Δscore ${site.history.scoreDelta > 0 ? "+" : ""}${site.history.scoreDelta}`
+                : ""}
+            </strong>
+          </div>
+          <div className="line">
+            <span>scan 7d / prev</span>
+            <strong>
+              {site.scanCount7d || 0} / {site.scanCountPrev7d || 0}
+            </strong>
+          </div>
+          <div className="line">
+            <span>scan momentum</span>
+            <strong>{site.scanMomentum || 0}</strong>
+          </div>
+          <div className="line">
+            <span>rising score</span>
+            <strong>{site.history?.risingScore ?? "-"}</strong>
+          </div>
         </div>
       </section>
 

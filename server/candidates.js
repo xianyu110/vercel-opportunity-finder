@@ -173,6 +173,11 @@ export function estimateCandidatePriority(item) {
   const multiSourceBoost = Math.min(24, (sourceCount - 1) * 10);
   const demandBoost = Math.min(30, demandHits.length * 10);
   const manualBoost = (item.sources || []).includes("Manual") || item.source === "Manual" ? 8 : 0;
+  const momentumBoost = Math.min(
+    28,
+    metricValue(item.scanMomentum) * 0.35 + metricValue(item.scanCount7d) * 3
+  );
+  const historyBoost = Math.min(16, metricValue(item.history?.risingScore) * 0.2);
 
   // Soft penalty for obvious adult/login host patterns before full analyze.
   const hostText = String(host || "").toLowerCase();
@@ -186,6 +191,8 @@ export function estimateCandidatePriority(item) {
       multiSourceBoost +
       recencyBoost +
       engagement +
+      momentumBoost +
+      historyBoost +
       manualBoost -
       riskPenalty
   );
